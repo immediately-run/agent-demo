@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "immediately.run": {
-    "requireLatest": "stale_ok"
+    "requireLatest": "stale_ok",
+    "invokes": [{ "task": "pick-color", "version": "^1" }]
   },
   "scripts": {
     "dev": "vite",

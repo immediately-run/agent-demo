@@ -4,7 +4,13 @@
 // still returns `forbidden` at the host gate. A real LLM agent would be handed
 // `useCatalog()` verbatim as its tools; the principle is identical.
 import { useState } from "react";
-import { useCatalog, invoke, postToRegion, type ApiMethod } from "@immediately-run/sdk";
+import {
+  useCatalog,
+  invoke,
+  postToRegion,
+  invokeTask,
+  type ApiMethod,
+} from "@immediately-run/sdk";
 import "./AgentDemo.css";
 
 // A method we deliberately do NOT hold (this app's grant lacks spaces:admin), to
@@ -47,6 +53,26 @@ export default function AgentDemo() {
   const [path, setPath] = useState("/README.md");
   const [ipcLog, setIpcLog] = useState<Array<{ to: string; result: Result }>>([]);
   const [posting, setPosting] = useState<string | null>(null);
+
+  // --- task invocation (§5.7): invoke another app, get a typed result back ------
+  const [color, setColor] = useState("#3b82f6");
+  const [picking, setPicking] = useState(false);
+  const [pickNote, setPickNote] = useState<string | null>(null);
+
+  const pickColor = async () => {
+    setPicking(true);
+    setPickNote(null);
+    try {
+      const res = await invokeTask<{ color: string }>("pick-color", { initial: color });
+      if (res?.color) setColor(res.color);
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      // `cancelled` is a normal outcome (user dismissed the overlay), not an error.
+      setPickNote(code === "cancelled" ? "cancelled" : code);
+    } finally {
+      setPicking(false);
+    }
+  };
 
   const post = async (to: string, data: unknown) => {
     setPosting(to);
@@ -149,6 +175,27 @@ export default function AgentDemo() {
               </li>
             ))}
           </ul>
+        )}
+      </div>
+
+      <div className="ad-escape">
+        <p className="ad-escape-h">Invoke another app (§5.7, task contract)</p>
+        <p className="ad-escape-sub">
+          A tool can call <code>pick-color</code> and get a typed color back. The host
+          loads the user's bound picker in an overlay, the picker returns a value, and
+          this app never sees the picker's code or grants — just the result:
+        </p>
+        <div className="ad-ipc-row">
+          <span className="ad-color-chip" style={{ background: color }} aria-label={`color ${color}`} />
+          <code className="ad-color-val">{color}</code>
+          <button type="button" className="ad-run" disabled={picking} onClick={pickColor}>
+            {picking ? "Picking…" : "Pick a color"}
+          </button>
+        </div>
+        {pickNote && (
+          <p className="ad-escape-sub">
+            invokeTask → <span className="ad-err">{pickNote}</span>
+          </p>
         )}
       </div>
 

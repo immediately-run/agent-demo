@@ -33,3 +33,7 @@
   font-size: 12px;
 }
 .ad-ipc-input:focus { outline: none; border-color: var(--ad-accent, #5b8def); }
+
+/* §5.7 task invocation: the picked-color chip + value */
+.ad-color-chip { width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--ad-border, #2c2f34); flex: 0 0 auto; }
+.ad-color-val { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
