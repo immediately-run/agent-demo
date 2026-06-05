@@ -1,0 +1,75 @@
+# Publishes a pre-cached zip of this repo to its own GitHub Pages on every push
+# to main, so immediately.run can load it fast — without hitting the GitHub API
+# (slow, and rate-limited for anonymous users). immediately.run looks for the
+# zip at https://<owner>.github.io/<repo>/cached_repositories/<branch>.zip and
+# falls back to the API if it's absent.
+#
+# The zip is built by `@immediately-run/cli cache-zip`, which embeds a
+# contribute-manifest sidecar so edits made on immediately.run can still be
+# pushed back to GitHub offline.
+#
+# One-time setup: Settings → Pages → Build and deployment → Source: GitHub Actions.
+
+name: Cache for immediately.run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow this workflow to publish to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two Pages deploys at once; let an in-progress one finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build cache zip
+        run: |
+          npx -y @immediately-run/cli@latest cache-zip \
+            --owner "${{ github.repository_owner }}" \
+            --repo "${{ github.event.repository.name }}" \
+            --ref "${{ github.ref_name }}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --out "_site/cached_repositories/${{ github.ref_name }}.zip"
+
+      # A friendly landing page so the Pages root isn't a bare 404. Optional —
+      # delete it if you serve your own content from Pages. (To also host a live
+      # build of the app here, run `npm ci && npm run build` and copy `dist/`
+      # into `_site/`; set Vite `base: './'` so asset paths resolve.)
+      - name: Write index.html
+        run: |
+          cat > _site/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8">
+          <title>immediately.run cache</title>
+          <p>This site hosts a pre-cached build of this repository for
+          <a href="https://immediately.run">immediately.run</a>.</p>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

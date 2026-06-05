@@ -1,0 +1,19 @@
+.ad { font: 13px/1.5 system-ui, -apple-system, sans-serif; color: var(--ad-fg, #e6e6e6); background: var(--ad-bg, #1b1d21); padding: 14px; min-width: 260px; }
+.ad-hd { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.ad-title { font-weight: 600; font-size: 14px; }
+.ad-sub { color: var(--ad-muted, #9aa0a6); font-size: 12px; }
+.ad-tools { list-style: none; margin: 0 0 14px; padding: 0; }
+.ad-tool { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.ad-name { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--ad-chip, #2c2f34); color: var(--ad-muted, #9aa0a6); }
+.ad-run { appearance: none; border: 1px solid var(--ad-border, #2c2f34); background: transparent; color: inherit; border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; }
+.ad-run:hover { background: var(--ad-hover, #23262b); }
+.ad-run:disabled { opacity: .5; cursor: default; }
+.ad-danger { border-color: #6b3b3b; color: #ffb4b4; }
+.ad-escape { border: 1px dashed var(--ad-border, #2c2f34); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+.ad-escape-h { margin: 0 0 4px; font-weight: 600; }
+.ad-escape-sub { margin: 0 0 8px; color: var(--ad-muted, #9aa0a6); font-size: 12px; }
+.ad-log { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.ad-logline { padding: 2px 0; }
+.ad-ok { color: #6ee7a8; }
+.ad-err { color: #ffb4b4; font-family: ui-monospace, monospace; }
