@@ -17,3 +17,19 @@
 .ad-logline { padding: 2px 0; }
 .ad-ok { color: #6ee7a8; }
 .ad-err { color: #ffb4b4; font-family: ui-monospace, monospace; }
+
+/* §5.6 inter-app messaging row (the path input + send button) */
+.ad-ipc-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.ad-ipc-input {
+  flex: 1; min-width: 0;
+  appearance: none;
+  border: 1px solid var(--ad-border, #2c2f34);
+  background: var(--ad-input-bg, #1a1d21);
+  color: inherit;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.ad-ipc-input:focus { outline: none; border-color: var(--ad-accent, #5b8def); }
