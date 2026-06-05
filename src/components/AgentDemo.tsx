@@ -9,6 +9,8 @@ import {
   invoke,
   postToRegion,
   invokeTask,
+  capFile,
+  openAppSpace,
   type ApiMethod,
 } from "@immediately-run/sdk";
 import "./AgentDemo.css";
@@ -71,6 +73,36 @@ export default function AgentDemo() {
       setPickNote(code === "cancelled" ? "cancelled" : code);
     } finally {
       setPicking(false);
+    }
+  };
+
+  // --- file delegation (§5.7/§8.7): hand a callee a file from MY OWN space -------
+  const [editing, setEditing] = useState(false);
+  const [editNote, setEditNote] = useState<string | null>(null);
+
+  const editFile = async () => {
+    setEditing(true);
+    setEditNote(null);
+    try {
+      // Open this app's own workspace (a granted space), then delegate ONE file in
+      // it to the bound edit-file app — the host mints an attenuated chroot; this
+      // app never sees the editor's code, only the typed { saved } result.
+      const space = await openAppSpace();
+      const res = await invokeTask<{ saved: boolean }>("edit-file", {
+        file: capFile({ mountId: `space:${space.id}`, relPath: "demo.txt" }, { mode: "rw" }),
+      });
+      setEditNote(res?.saved ? "saved demo.txt to your space ✓" : "done");
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      setEditNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "auth-required"
+            ? "sign in to use a space"
+            : code,
+      );
+    } finally {
+      setEditing(false);
     }
   };
 
@@ -195,6 +227,24 @@ export default function AgentDemo() {
         {pickNote && (
           <p className="ad-escape-sub">
             invokeTask → <span className="ad-err">{pickNote}</span>
+          </p>
+        )}
+      </div>
+
+      <div className="ad-escape">
+        <p className="ad-escape-h">Delegate a file to another app (§5.7/§8.7)</p>
+        <p className="ad-escape-sub">
+          Hand the <code>edit-file</code> app ONE file from your space. The host mints
+          an attenuated, task-scoped chroot — the editor can name nothing else, and a
+          read-only delegation is a real <code>EROFS</code> wall. Your grant narrows;
+          it never amplifies (G7):
+        </p>
+        <button type="button" className="ad-run" disabled={editing} onClick={editFile}>
+          {editing ? "Editing…" : "Edit demo.txt in my space"}
+        </button>
+        {editNote && (
+          <p className="ad-escape-sub">
+            edit-file → <span className="ad-err">{editNote}</span>
           </p>
         )}
       </div>

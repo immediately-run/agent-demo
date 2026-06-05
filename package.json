@@ -5,7 +5,10 @@
   "type": "module",
   "immediately.run": {
     "requireLatest": "stale_ok",
-    "invokes": [{ "task": "pick-color", "version": "^1" }]
+    "invokes": [
+      { "task": "pick-color", "version": "^1" },
+      { "task": "edit-file", "version": "^1" }
+    ]
   },
   "scripts": {
     "dev": "vite",
