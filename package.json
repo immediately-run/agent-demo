@@ -14,9 +14,6 @@
         "task": "edit-file",
         "version": "^1"
       }
-    ],
-    "resolveFromRegistry": [
-      "@immediately-run/sdk"
     ]
   },
   "scripts": {
