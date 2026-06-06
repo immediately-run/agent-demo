@@ -6,8 +6,17 @@
   "immediately.run": {
     "requireLatest": "stale_ok",
     "invokes": [
-      { "task": "pick-color", "version": "^1" },
-      { "task": "edit-file", "version": "^1" }
+      {
+        "task": "pick-color",
+        "version": "^1"
+      },
+      {
+        "task": "edit-file",
+        "version": "^1"
+      }
+    ],
+    "resolveFromRegistry": [
+      "@immediately-run/sdk"
     ]
   },
   "scripts": {
@@ -17,7 +26,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.2.3",
+    "@immediately-run/sdk": "0.2.8",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
