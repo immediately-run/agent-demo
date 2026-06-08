@@ -32,15 +32,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned by commit SHA, and the CLI by an exact
+      # version — this workflow holds `pages: write`, so a floating tag
+      # (`@latest`, `@v4`) would let an upstream compromise poison the cache a
+      # repo serves to immediately.run (ZIP_CACHE_AUTOMATION_SPEC §8). Bump
+      # these deliberately when you mean to.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
       - name: Build cache zip
         run: |
-          npx -y @immediately-run/cli@latest cache-zip \
+          npx -y @immediately-run/cli@0.1.0 cache-zip \
             --owner "${{ github.repository_owner }}" \
             --repo "${{ github.event.repository.name }}" \
             --ref "${{ github.ref_name }}" \
@@ -60,7 +65,7 @@ jobs:
           <a href="https://immediately.run">immediately.run</a>.</p>
           HTML
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: _site
 
@@ -72,4 +77,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
