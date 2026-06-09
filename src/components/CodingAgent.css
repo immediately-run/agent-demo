@@ -1,0 +1,74 @@
+.ca {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.ca-hd {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.ca-title {
+  font-weight: 600;
+}
+.ca-sub {
+  font-size: 12px;
+  opacity: 0.6;
+}
+.ca-key,
+.ca-prompt {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--panel, #161616);
+  color: inherit;
+  font: inherit;
+}
+.ca-prompt-row {
+  display: flex;
+  gap: 8px;
+}
+.ca-prompt {
+  flex: 1;
+}
+.ca-run {
+  padding: 8px 16px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--accent, #6d28d9);
+  color: #fff;
+  cursor: pointer;
+}
+.ca-run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ca-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.ca-line code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+.ca-args {
+  opacity: 0.7;
+  word-break: break-all;
+}
+.ca-ok {
+  color: #34d399;
+}
+.ca-err {
+  color: #f87171;
+}
+.ca-text {
+  white-space: pre-wrap;
+}
