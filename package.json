@@ -14,12 +14,32 @@
         "task": "edit-file",
         "version": "^1"
       }
-    ]
+    ],
+    "requests": {
+      "net:fetch": {
+        "hosts": [
+          {
+            "origin": "https://api.anthropic.com",
+            "paths": [
+              "/v1/"
+            ],
+            "methods": [
+              "POST"
+            ],
+            "injectSecret": {
+              "family": "anthropic",
+              "type": "api-key"
+            }
+          }
+        ]
+      }
+    }
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "vitest run",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -39,7 +59,8 @@
     "globals": "^17.5.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.9"
+    "vite": "^8.0.9",
+    "vitest": "^4.1.8"
   },
   "description": "Embedded-agent demo — a tool-runner confined to its grant-filtered method catalog (§5.5/§5.9)."
 }
