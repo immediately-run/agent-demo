@@ -8,7 +8,8 @@
 # contribute-manifest sidecar so edits made on immediately.run can still be
 # pushed back to GitHub offline.
 #
-# One-time setup: Settings → Pages → Build and deployment → Source: GitHub Actions.
+# Pages is auto-provisioned by the `actions/configure-pages` step below
+# (enablement: true), so no manual Settings → Pages step is needed on a fresh repo.
 
 name: Cache for immediately.run
 
@@ -42,6 +43,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+
+      # Auto-provision GitHub Pages so the deploy job can publish even on a
+      # freshly-created repo. Without this, `deploy-pages` 404s every run until
+      # someone manually flips Settings → Pages → Source: GitHub Actions.
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+        with:
+          enablement: true
 
       - name: Build cache zip
         run: |
