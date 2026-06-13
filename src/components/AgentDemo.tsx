@@ -10,7 +10,7 @@ import {
   postToRegion,
   invokeTask,
   capFile,
-  openAppSpace,
+  openSettings,
   type ApiMethod,
 } from "@immediately-run/sdk";
 import "./AgentDemo.css";
@@ -84,14 +84,15 @@ export default function AgentDemo() {
     setEditing(true);
     setEditNote(null);
     try {
-      // Open this app's own workspace (a granted space), then delegate ONE file in
-      // it to the bound edit-file app — the host mints an attenuated chroot; this
-      // app never sees the editor's code, only the typed { saved } result.
-      const space = await openAppSpace();
+      // Open this app's own per-user settings (a private ~/.config-style mount),
+      // then delegate ONE file in it to the bound edit-file app — the host mints an
+      // attenuated chroot; this app never sees the editor's code, only the typed
+      // { saved } result.
+      const settings = await openSettings();
       const res = await invokeTask<{ saved: boolean }>("edit-file", {
-        file: capFile({ mountId: `space:${space.id}`, relPath: "demo.txt" }, { mode: "rw" }),
+        file: capFile({ mountId: settings.id ?? settings.path, relPath: "demo.txt" }, { mode: "rw" }),
       });
-      setEditNote(res?.saved ? "saved demo.txt to your space ✓" : "done");
+      setEditNote(res?.saved ? "saved demo.txt to your settings ✓" : "done");
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       setEditNote(
