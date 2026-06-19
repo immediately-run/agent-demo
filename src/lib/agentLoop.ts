@@ -30,12 +30,16 @@ export interface ModelResponse {
 }
 
 /** The provider seam — one model turn. Implemented by `claudeClient.ts` over
- *  `hostFetch`; faked in tests. */
+ *  `hostFetch`/`hostFetchStream`; faked in tests. When the client streams, it
+ *  calls `onTextDelta` with each token slice as it arrives (the assembled turn
+ *  is still returned whole); a non-streaming client simply never calls it. */
 export interface ModelClient {
   createMessage(req: {
     system?: string;
     messages: ChatMessage[];
     tools: AgentTool[];
+    /** Called with incremental assistant-text slices during a streamed turn. */
+    onTextDelta?: (text: string) => void;
   }): Promise<ModelResponse>;
 }
 
@@ -48,6 +52,9 @@ export type ToolExecutor = (
 
 /** Optional UI hooks so a panel can render the loop as it runs. */
 export interface AgentEvents {
+  /** A streamed token slice of the in-flight assistant turn (live preview). */
+  onAssistantDelta?(text: string): void;
+  /** The complete assistant text for a turn, once the turn is in. */
   onAssistantText?(text: string): void;
   onToolUse?(name: string, input: Record<string, unknown>): void;
   onToolResult?(name: string, result: { content: string; isError?: boolean }): void;
@@ -85,7 +92,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   ];
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const res = await client.createMessage({ system, messages, tools });
+    const res = await client.createMessage({
+      system,
+      messages,
+      tools,
+      onTextDelta: events?.onAssistantDelta,
+    });
 
     const assistantText = textOf(res.content);
     if (assistantText) events?.onAssistantText?.(assistantText);

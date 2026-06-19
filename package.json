@@ -43,12 +43,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.7.0",
+    "@immediately-run/sdk": "^0.11.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@immediately-run/dev-fs": "^0.1.0",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
