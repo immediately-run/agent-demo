@@ -10,7 +10,7 @@
 // host injects `x-api-key` from the `injectSecret` rule declared in package.json.
 // If the user hasn't stored an Anthropic key yet, we offer the host's "add secret"
 // modal (the value is typed into host chrome, never here).
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useCatalog,
   useMounts,
@@ -22,6 +22,9 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
 import { createClaudeClient } from "../lib/claudeClient";
 import { runAgent } from "../lib/agentLoop";
+import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
+import type { Conversation } from "../lib/conversationModel";
+import { messagesToLog, type LogEntry } from "../lib/transcript";
 import "./CodingAgent.css";
 
 const SYSTEM =
@@ -32,12 +35,6 @@ const SYSTEM =
   "edits with write_file, then stop. If a tool returns `forbidden`, the app lacks " +
   "that grant — do not retry it; explain what's missing instead.";
 
-type LogEntry =
-  | { kind: "text"; text: string }
-  | { kind: "tool"; name: string; input: Record<string, unknown> }
-  | { kind: "result"; name: string; content: string; isError?: boolean }
-  | { kind: "error"; text: string };
-
 export default function CodingAgent() {
   const catalog = useCatalog();
   const mounts = useMounts();
@@ -47,6 +44,32 @@ export default function CodingAgent() {
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
   const [keyMsg, setKeyMsg] = useState<string | null>(null);
+
+  // Persistence (Phase 01): keep this run in a durable conversation so it survives
+  // reload. Best-effort — `openSettings()` is inert in local dev / signed out, so a
+  // failure degrades to today's ephemeral behavior rather than crashing.
+  const storeRef = useRef<ConversationStore | null>(null);
+  const convRef = useRef<Conversation | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const store = await openConversationStore();
+        if (!live) return;
+        storeRef.current = store;
+        const [newest] = await store.list();
+        const conv = newest ? await store.load(newest.id) : await store.create();
+        if (!live || !conv) return;
+        convRef.current = conv;
+        if (conv.messages.length) setLog(messagesToLog(conv.messages));
+      } catch {
+        /* no host / signed out — stay ephemeral */
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Merge the platform catalog with filesystem tools chrooted to the app's
   // working tree. Re-derived when grants or the mount's writability change.
@@ -94,8 +117,9 @@ export default function CodingAgent() {
     setRunning(true);
     setLog([]);
     setStreaming("");
+    append({ kind: "user", text: prompt });
     try {
-      await runAgent({
+      const transcript = await runAgent({
         client: createClaudeClient(), // no apiKey: the host injects it (injectSecret)
         tools: toolset.tools,
         execute: toolset.execute,
@@ -112,11 +136,25 @@ export default function CodingAgent() {
             append({ kind: "result", name, content: r.content, isError: r.isError }),
         },
       });
+      await persist(transcript);
     } catch (e) {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
     } finally {
       setStreaming("");
       setRunning(false);
+    }
+  };
+
+  // Save the run into its conversation (best-effort; no-op without a store).
+  const persist = async (messages: Conversation["messages"]) => {
+    const store = storeRef.current;
+    if (!store) return;
+    try {
+      const conv = convRef.current ?? (await store.create());
+      const title = conv.title === "New conversation" ? deriveTitle(messages) : conv.title;
+      convRef.current = await store.save({ ...conv, title, messages });
+    } catch {
+      /* persistence is best-effort — never break the run on a write failure */
     }
   };
 
@@ -158,6 +196,7 @@ export default function CodingAgent() {
       <ul className="ca-log">
         {log.map((e, i) => (
           <li key={i} className={`ca-line ca-${e.kind}`}>
+            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
             {e.kind === "text" && <span className="ca-text">{e.text}</span>}
             {e.kind === "tool" && (
               <span>
