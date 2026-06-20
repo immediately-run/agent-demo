@@ -17,7 +17,6 @@
   font-size: 12px;
   opacity: 0.6;
 }
-.ca-key,
 .ca-prompt {
   width: 100%;
   padding: 8px 10px;
@@ -26,6 +25,32 @@
   background: var(--panel, #161616);
   color: inherit;
   font: inherit;
+}
+.ca-key {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ca-keybtn {
+  padding: 6px 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--panel, #161616);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ca-keyhint {
+  font-size: 12px;
+  opacity: 0.6;
+}
+.ca-keymsg {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.ca-live {
+  opacity: 0.85;
 }
 .ca-prompt-row {
   display: flex;
