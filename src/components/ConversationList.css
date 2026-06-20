@@ -1,0 +1,93 @@
+.cl {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  height: 100%;
+  box-sizing: border-box;
+}
+.cl-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cl-title {
+  font-weight: 600;
+}
+.cl-new {
+  padding: 5px 10px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--panel, #161616);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cl-empty {
+  margin: 4px 2px;
+  font-size: 13px;
+  opacity: 0.6;
+}
+.cl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: auto;
+}
+.cl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.cl-row:hover,
+.cl-row:focus-visible {
+  background: var(--panel, #161616);
+  outline: none;
+}
+.cl-row-active {
+  border-color: var(--border, #2a2a2a);
+  background: var(--panel, #161616);
+}
+.cl-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.cl-row-title {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cl-row-time {
+  font-size: 11px;
+  opacity: 0.55;
+}
+.cl-del {
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.cl-row:hover .cl-del,
+.cl-row:focus-within .cl-del {
+  opacity: 0.6;
+}
+.cl-del:hover {
+  opacity: 1;
+}

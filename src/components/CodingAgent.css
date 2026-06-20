@@ -97,3 +97,7 @@
 .ca-text {
   white-space: pre-wrap;
 }
+.ca-user {
+  white-space: pre-wrap;
+  font-weight: 600;
+}

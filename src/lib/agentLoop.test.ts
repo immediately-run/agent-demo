@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { runAgent, type ModelClient, type ModelResponse } from './agentLoop';
+import { runAgent, type ChatMessage, type ModelClient, type ModelResponse } from './agentLoop';
 import type { AgentTool } from './agentTools';
 
 const TOOLS: AgentTool[] = [
@@ -20,6 +20,33 @@ function scriptedClient(turns: ModelResponse[]): ModelClient & { calls: number }
 }
 
 describe('runAgent — the agentic tool-use loop (§3.3)', () => {
+  it('seeds the model request with prior history before the new prompt (Phase 05)', async () => {
+    const seen: ChatMessage[][] = [];
+    const client: ModelClient = {
+      async createMessage(req) {
+        seen.push([...req.messages]); // snapshot: the loop mutates this array in place
+        return { stopReason: 'end_turn', content: [{ type: 'text', text: 'ok' }] };
+      },
+    };
+    const history: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first turn' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'sure' }] },
+    ];
+
+    const transcript = await runAgent({
+      client,
+      tools: TOOLS,
+      execute: async () => ({ content: 'r' }),
+      history,
+      prompt: 'follow-up',
+    });
+
+    // The first model request carries the history followed by the new prompt.
+    expect(seen[0]).toEqual([...history, { role: 'user', content: [{ type: 'text', text: 'follow-up' }] }]);
+    // The returned transcript starts from the seeded history (full conversation).
+    expect(transcript.slice(0, 2)).toEqual(history);
+  });
+
   it('executes tool calls, appends results, and loops until end_turn', async () => {
     const client = scriptedClient([
       { stopReason: 'tool_use', content: [

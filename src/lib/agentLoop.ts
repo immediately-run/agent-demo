@@ -65,6 +65,9 @@ export interface RunAgentOptions {
   tools: AgentTool[];
   execute: ToolExecutor;
   system?: string;
+  /** Prior turns of this conversation, replayed before the new prompt so a
+   *  follow-up has context (the conversation stage seeds this from the store). */
+  history?: ChatMessage[];
   /** The user's instruction that kicks off the loop. */
   prompt: string;
   /** Hard cap on model turns (default 12) — bounds runaway loops. */
@@ -88,6 +91,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   const maxTurns = opts.maxTurns ?? 12;
 
   const messages: ChatMessage[] = [
+    ...(opts.history ?? []),
     { role: 'user', content: [{ type: 'text', text: prompt }] },
   ];
 

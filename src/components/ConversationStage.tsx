@@ -1,22 +1,18 @@
-// A real in-browser coding-agent loop (LLM_AND_AGENTS_SPEC §3.3). It hands the
-// model two tool sources merged into one list: the app's grant-filtered §5.5
-// catalog (driven through the host's gated `invoke()`) and mount-scoped
-// filesystem tools (read/write/list/stat/glob/grep/delete over the app's working
-// tree). Confinement is automatic (G12/T24): the model can only drive methods in
-// this app's catalog or files inside its mount chroot; anything else returns
-// `forbidden`/`not found`.
-//
-// The LLM key is host-mediated (SECRETS_SPEC §6): the app never holds it — the
-// host injects `x-api-key` from the `injectSecret` rule declared in package.json.
-// If the user hasn't stored an Anthropic key yet, we offer the host's "add secret"
-// modal (the value is typed into host chrome, never here).
-import { useEffect, useMemo, useRef, useState } from "react";
+// The conversation STAGE — the stage-slot half of the agents activity (plan Phase
+// 05, region `stage.conversation`). The analog of the editor: it loads the
+// conversation the panel selected, shows its transcript, and runs the in-browser
+// agent loop, persisting every turn. The loop, tools, streaming, and host-mediated
+// BYOK are the same machinery the standalone CodingAgent uses (LLM_AND_AGENTS_SPEC
+// §3.3); confinement is automatic (G12/T24): catalog ⊕ mount-chroot fs tools only.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useCatalog,
   useMounts,
   useSecrets,
   getAppMountPath,
   requestAddSecret,
+  postToRegion,
+  onRegionMessage,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
@@ -25,6 +21,7 @@ import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
+import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import "./CodingAgent.css";
 
 const SYSTEM =
@@ -35,44 +32,19 @@ const SYSTEM =
   "edits with write_file, then stop. If a tool returns `forbidden`, the app lacks " +
   "that grant — do not retry it; explain what's missing instead.";
 
-export default function CodingAgent() {
+export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
   const secrets = useSecrets();
-  const [prompt, setPrompt] = useState("");
+  const storeRef = useRef<ConversationStore | null>(null);
+  const convRef = useRef<Conversation | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
+  const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
   const [keyMsg, setKeyMsg] = useState<string | null>(null);
+  const [title, setTitle] = useState<string>("");
 
-  // Persistence (Phase 01): keep this run in a durable conversation so it survives
-  // reload. Best-effort — `openSettings()` is inert in local dev / signed out, so a
-  // failure degrades to today's ephemeral behavior rather than crashing.
-  const storeRef = useRef<ConversationStore | null>(null);
-  const convRef = useRef<Conversation | null>(null);
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      try {
-        const store = await openConversationStore();
-        if (!live) return;
-        storeRef.current = store;
-        const [newest] = await store.list();
-        const conv = newest ? await store.load(newest.id) : await store.create();
-        if (!live || !conv) return;
-        convRef.current = conv;
-        if (conv.messages.length) setLog(messagesToLog(conv.messages));
-      } catch {
-        /* no host / signed out — stay ephemeral */
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  // Merge the platform catalog with filesystem tools chrooted to the app's
-  // working tree. Re-derived when grants or the mount's writability change.
   const toolset = useMemo(() => {
     const root = getAppMountPath();
     const appMount = mounts.find((m) => m.path === root);
@@ -80,9 +52,6 @@ export default function CodingAgent() {
     return mergeToolsets(catalogToolset(catalog), fsTools);
   }, [catalog, mounts]);
 
-  // Best-effort: do we already have an Anthropic api-key the host can inject?
-  // (secrets:list is elevated; if it's withheld the list stays empty and we just
-  // show the "add" affordance — injection still works once a key exists.)
   const hasKey = secrets.some(
     (s) =>
       s.type === "api-key" &&
@@ -90,6 +59,51 @@ export default function CodingAgent() {
   );
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
+
+  const showConversation = useCallback((conv: Conversation) => {
+    convRef.current = conv;
+    setTitle(conv.title);
+    setLog(messagesToLog(conv.messages));
+    setStreaming("");
+  }, []);
+
+  const loadConversation = useCallback(
+    async (id: string) => {
+      const store = storeRef.current;
+      if (!store) return;
+      const conv = await store.load(id);
+      if (conv) showConversation(conv);
+    },
+    [showConversation],
+  );
+
+  // Open the store; if no selection arrives, show the newest so the stage isn't blank.
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const store = await openConversationStore();
+        if (!live) return;
+        storeRef.current = store;
+        if (!convRef.current) {
+          const [newest] = await store.list();
+          if (newest && live) await loadConversation(newest.id);
+        }
+      } catch {
+        /* no host / signed out — render empty */
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [loadConversation]);
+
+  // The panel drives which conversation is shown.
+  useEffect(() => {
+    return onRegionMessage((m) => {
+      if (isSelect(m.data)) void loadConversation(m.data.id);
+    });
+  }, [loadConversation]);
 
   const addKey = async () => {
     setKeyMsg(null);
@@ -114,17 +128,32 @@ export default function CodingAgent() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
+    const store = storeRef.current;
+    // Ensure a conversation exists to attach this run to.
+    let conv = convRef.current;
+    if (!conv && store) {
+      try {
+        conv = await store.create();
+        convRef.current = conv;
+        setTitle(conv.title);
+      } catch {
+        /* fall through — run ephemerally if create fails */
+      }
+    }
+    const history = conv?.messages ?? [];
+    const kickoff = prompt;
+    setPrompt("");
     setRunning(true);
-    setLog([]);
     setStreaming("");
-    append({ kind: "user", text: prompt });
+    append({ kind: "user", text: kickoff });
     try {
       const transcript = await runAgent({
-        client: createClaudeClient(), // no apiKey: the host injects it (injectSecret)
+        client: createClaudeClient(),
         tools: toolset.tools,
         execute: toolset.execute,
         system: SYSTEM,
-        prompt,
+        history,
+        prompt: kickoff,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           onAssistantText: (text) => {
@@ -132,11 +161,19 @@ export default function CodingAgent() {
             setStreaming("");
           },
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
-          onToolResult: (name, r) =>
-            append({ kind: "result", name, content: r.content, isError: r.isError }),
+          onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
         },
       });
-      await persist(transcript);
+      if (conv && store) {
+        const newTitle = conv.title === "New conversation" ? deriveTitle(transcript) : conv.title;
+        try {
+          convRef.current = await store.save({ ...conv, title: newTitle, messages: transcript });
+          setTitle(newTitle);
+          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        } catch {
+          /* persistence best-effort */
+        }
+      }
     } catch (e) {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
     } finally {
@@ -145,23 +182,10 @@ export default function CodingAgent() {
     }
   };
 
-  // Save the run into its conversation (best-effort; no-op without a store).
-  const persist = async (messages: Conversation["messages"]) => {
-    const store = storeRef.current;
-    if (!store) return;
-    try {
-      const conv = convRef.current ?? (await store.create());
-      const title = conv.title === "New conversation" ? deriveTitle(messages) : conv.title;
-      convRef.current = await store.save({ ...conv, title, messages });
-    } catch {
-      /* persistence is best-effort — never break the run on a write failure */
-    }
-  };
-
   return (
     <div className="ca">
       <header className="ca-hd">
-        <span className="ca-title">Coding agent</span>
+        <span className="ca-title">{title || "Conversation"}</span>
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
       </header>
 
@@ -176,6 +200,31 @@ export default function CodingAgent() {
         </div>
       )}
       {keyMsg && <div className="ca-keymsg">{keyMsg}</div>}
+
+      <ul className="ca-log" aria-live="polite">
+        {log.map((e, i) => (
+          <li key={i} className={`ca-line ca-${e.kind}`}>
+            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
+            {e.kind === "text" && <span className="ca-text">{e.text}</span>}
+            {e.kind === "tool" && (
+              <span>
+                → <code>{e.name}</code> <code className="ca-args">{JSON.stringify(e.input)}</code>
+              </span>
+            )}
+            {e.kind === "result" && (
+              <span className={e.isError ? "ca-err" : "ca-ok"}>
+                <code>{e.name}</code> {e.isError ? "✗" : "✓"} <code className="ca-args">{e.content}</code>
+              </span>
+            )}
+            {e.kind === "error" && <span className="ca-err">{e.text}</span>}
+          </li>
+        ))}
+        {streaming && (
+          <li className="ca-line ca-text ca-live">
+            <span className="ca-text">{streaming}</span>
+          </li>
+        )}
+      </ul>
 
       <div className="ca-prompt-row">
         <input
@@ -192,32 +241,6 @@ export default function CodingAgent() {
           {running ? "Running…" : "Run"}
         </button>
       </div>
-
-      <ul className="ca-log">
-        {log.map((e, i) => (
-          <li key={i} className={`ca-line ca-${e.kind}`}>
-            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
-            {e.kind === "text" && <span className="ca-text">{e.text}</span>}
-            {e.kind === "tool" && (
-              <span>
-                → <code>{e.name}</code> <code className="ca-args">{JSON.stringify(e.input)}</code>
-              </span>
-            )}
-            {e.kind === "result" && (
-              <span className={e.isError ? "ca-err" : "ca-ok"}>
-                <code>{e.name}</code> {e.isError ? "✗" : "✓"}{" "}
-                <code className="ca-args">{e.content}</code>
-              </span>
-            )}
-            {e.kind === "error" && <span className="ca-err">{e.text}</span>}
-          </li>
-        ))}
-        {streaming && (
-          <li className="ca-line ca-text ca-live">
-            <span className="ca-text">{streaming}</span>
-          </li>
-        )}
-      </ul>
     </div>
   );
 }
