@@ -1,0 +1,246 @@
+// The conversation STAGE — the stage-slot half of the agents activity (plan Phase
+// 05, region `stage.conversation`). The analog of the editor: it loads the
+// conversation the panel selected, shows its transcript, and runs the in-browser
+// agent loop, persisting every turn. The loop, tools, streaming, and host-mediated
+// BYOK are the same machinery the standalone CodingAgent uses (LLM_AND_AGENTS_SPEC
+// §3.3); confinement is automatic (G12/T24): catalog ⊕ mount-chroot fs tools only.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCatalog,
+  useMounts,
+  useSecrets,
+  getAppMountPath,
+  requestAddSecret,
+  postToRegion,
+  onRegionMessage,
+} from "@immediately-run/sdk";
+import { catalogToolset, mergeToolsets } from "../lib/toolset";
+import { createFsToolset } from "../lib/fsTools";
+import { createClaudeClient } from "../lib/claudeClient";
+import { runAgent } from "../lib/agentLoop";
+import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
+import type { Conversation } from "../lib/conversationModel";
+import { messagesToLog, type LogEntry } from "../lib/transcript";
+import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
+import "./CodingAgent.css";
+
+const SYSTEM =
+  "You are a coding agent embedded in an immediately.run app. You have two kinds " +
+  "of tools: filesystem tools (read_file, write_file, list_dir, stat, glob, grep, " +
+  "delete_file) scoped to this app's workspace, and platform methods this app has " +
+  "been granted. Explore with list_dir/glob/grep before editing, make focused " +
+  "edits with write_file, then stop. If a tool returns `forbidden`, the app lacks " +
+  "that grant — do not retry it; explain what's missing instead.";
+
+export default function ConversationStage() {
+  const catalog = useCatalog();
+  const mounts = useMounts();
+  const secrets = useSecrets();
+  const storeRef = useRef<ConversationStore | null>(null);
+  const convRef = useRef<Conversation | null>(null);
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [prompt, setPrompt] = useState("");
+  const [streaming, setStreaming] = useState("");
+  const [running, setRunning] = useState(false);
+  const [keyMsg, setKeyMsg] = useState<string | null>(null);
+  const [title, setTitle] = useState<string>("");
+
+  const toolset = useMemo(() => {
+    const root = getAppMountPath();
+    const appMount = mounts.find((m) => m.path === root);
+    const fsTools = createFsToolset({ root, readOnly: appMount?.mode === "ro" });
+    return mergeToolsets(catalogToolset(catalog), fsTools);
+  }, [catalog, mounts]);
+
+  const hasKey = secrets.some(
+    (s) =>
+      s.type === "api-key" &&
+      (s.family === "anthropic" || (s.boundOrigin ?? "").includes("anthropic.com")),
+  );
+
+  const append = (e: LogEntry) => setLog((l) => [...l, e]);
+
+  const showConversation = useCallback((conv: Conversation) => {
+    convRef.current = conv;
+    setTitle(conv.title);
+    setLog(messagesToLog(conv.messages));
+    setStreaming("");
+  }, []);
+
+  const loadConversation = useCallback(
+    async (id: string) => {
+      const store = storeRef.current;
+      if (!store) return;
+      const conv = await store.load(id);
+      if (conv) showConversation(conv);
+    },
+    [showConversation],
+  );
+
+  // Open the store; if no selection arrives, show the newest so the stage isn't blank.
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const store = await openConversationStore();
+        if (!live) return;
+        storeRef.current = store;
+        if (!convRef.current) {
+          const [newest] = await store.list();
+          if (newest && live) await loadConversation(newest.id);
+        }
+      } catch {
+        /* no host / signed out — render empty */
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [loadConversation]);
+
+  // The panel drives which conversation is shown.
+  useEffect(() => {
+    return onRegionMessage((m) => {
+      if (isSelect(m.data)) void loadConversation(m.data.id);
+    });
+  }, [loadConversation]);
+
+  const addKey = async () => {
+    setKeyMsg(null);
+    try {
+      await requestAddSecret({
+        type: "api-key",
+        family: "anthropic",
+        suggestedOrigin: "https://api.anthropic.com",
+        description: "Anthropic API key for the coding agent",
+      });
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      setKeyMsg(
+        code === "cancelled"
+          ? "Key setup cancelled."
+          : code === "forbidden"
+            ? "This app can't manage secrets here; add an Anthropic key in host settings."
+            : `Couldn't add key: ${(e as Error)?.message ?? String(e)}`,
+      );
+    }
+  };
+
+  const run = async () => {
+    if (!prompt.trim() || running) return;
+    const store = storeRef.current;
+    // Ensure a conversation exists to attach this run to.
+    let conv = convRef.current;
+    if (!conv && store) {
+      try {
+        conv = await store.create();
+        convRef.current = conv;
+        setTitle(conv.title);
+      } catch {
+        /* fall through — run ephemerally if create fails */
+      }
+    }
+    const history = conv?.messages ?? [];
+    const kickoff = prompt;
+    setPrompt("");
+    setRunning(true);
+    setStreaming("");
+    append({ kind: "user", text: kickoff });
+    try {
+      const transcript = await runAgent({
+        client: createClaudeClient(),
+        tools: toolset.tools,
+        execute: toolset.execute,
+        system: SYSTEM,
+        history,
+        prompt: kickoff,
+        events: {
+          onAssistantDelta: (text) => setStreaming((s) => s + text),
+          onAssistantText: (text) => {
+            if (text.trim()) append({ kind: "text", text });
+            setStreaming("");
+          },
+          onToolUse: (name, input) => append({ kind: "tool", name, input }),
+          onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
+        },
+      });
+      if (conv && store) {
+        const newTitle = conv.title === "New conversation" ? deriveTitle(transcript) : conv.title;
+        try {
+          convRef.current = await store.save({ ...conv, title: newTitle, messages: transcript });
+          setTitle(newTitle);
+          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        } catch {
+          /* persistence best-effort */
+        }
+      }
+    } catch (e) {
+      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+    } finally {
+      setStreaming("");
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="ca">
+      <header className="ca-hd">
+        <span className="ca-title">{title || "Conversation"}</span>
+        <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
+      </header>
+
+      {!hasKey && (
+        <div className="ca-key">
+          <button type="button" className="ca-keybtn" onClick={() => void addKey()}>
+            Add Anthropic API key
+          </button>
+          <span className="ca-keyhint">
+            Stored by the host and injected per request — never held by this app.
+          </span>
+        </div>
+      )}
+      {keyMsg && <div className="ca-keymsg">{keyMsg}</div>}
+
+      <ul className="ca-log" aria-live="polite">
+        {log.map((e, i) => (
+          <li key={i} className={`ca-line ca-${e.kind}`}>
+            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
+            {e.kind === "text" && <span className="ca-text">{e.text}</span>}
+            {e.kind === "tool" && (
+              <span>
+                → <code>{e.name}</code> <code className="ca-args">{JSON.stringify(e.input)}</code>
+              </span>
+            )}
+            {e.kind === "result" && (
+              <span className={e.isError ? "ca-err" : "ca-ok"}>
+                <code>{e.name}</code> {e.isError ? "✗" : "✓"} <code className="ca-args">{e.content}</code>
+              </span>
+            )}
+            {e.kind === "error" && <span className="ca-err">{e.text}</span>}
+          </li>
+        ))}
+        {streaming && (
+          <li className="ca-line ca-text ca-live">
+            <span className="ca-text">{streaming}</span>
+          </li>
+        )}
+      </ul>
+
+      <div className="ca-prompt-row">
+        <input
+          className="ca-prompt"
+          placeholder="Ask the agent to read, search, or edit your app…"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void run();
+          }}
+          aria-label="Prompt"
+        />
+        <button type="button" className="ca-run" disabled={running} onClick={() => void run()}>
+          {running ? "Running…" : "Run"}
+        </button>
+      </div>
+    </div>
+  );
+}
