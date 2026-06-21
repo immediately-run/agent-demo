@@ -11,16 +11,11 @@
 // If the user hasn't stored an Anthropic key yet, we offer the host's "add secret"
 // modal (the value is typed into host chrome, never here).
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  useCatalog,
-  useMounts,
-  useSecrets,
-  getAppMountPath,
-  requestAddSecret,
-} from "@immediately-run/sdk";
+import { useCatalog, useMounts, getAppMountPath } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
-import { createClaudeClient } from "../lib/claudeClient";
+import { createModelClient } from "../lib/modelClient";
+import { useProviderConnection } from "../lib/useProviderConnection";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -38,12 +33,13 @@ const SYSTEM =
 export default function CodingAgent() {
   const catalog = useCatalog();
   const mounts = useMounts();
-  const secrets = useSecrets();
   const [prompt, setPrompt] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
-  const [keyMsg, setKeyMsg] = useState<string | null>(null);
+  // Provider-key connection (default OpenRouter): `connect` binds the user's
+  // stored key to this app before the first model call (see the hook).
+  const { provider, connected, hasStoredKey, keyMsg, connect } = useProviderConnection();
 
   // Persistence (Phase 01): keep this run in a durable conversation so it survives
   // reload. Best-effort — `openSettings()` is inert in local dev / signed out, so a
@@ -80,47 +76,21 @@ export default function CodingAgent() {
     return mergeToolsets(catalogToolset(catalog), fsTools);
   }, [catalog, mounts]);
 
-  // Best-effort: do we already have an Anthropic api-key the host can inject?
-  // (secrets:list is elevated; if it's withheld the list stays empty and we just
-  // show the "add" affordance — injection still works once a key exists.)
-  const hasKey = secrets.some(
-    (s) =>
-      s.type === "api-key" &&
-      (s.family === "anthropic" || (s.boundOrigin ?? "").includes("anthropic.com")),
-  );
-
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
-
-  const addKey = async () => {
-    setKeyMsg(null);
-    try {
-      await requestAddSecret({
-        type: "api-key",
-        family: "anthropic",
-        suggestedOrigin: "https://api.anthropic.com",
-        description: "Anthropic API key for the coding agent",
-      });
-    } catch (e) {
-      const code = (e as { code?: string })?.code;
-      setKeyMsg(
-        code === "cancelled"
-          ? "Key setup cancelled."
-          : code === "forbidden"
-            ? "This app can't manage secrets here; add an Anthropic key in host settings."
-            : `Couldn't add key: ${(e as Error)?.message ?? String(e)}`,
-      );
-    }
-  };
 
   const run = async () => {
     if (!prompt.trim() || running) return;
+    // Ensure the provider key is bound to this app before the first call — the
+    // browser-direct injectSecret path needs the use-grant or the host refuses
+    // the fetch ("outside manifest ∩ grant allowlist").
+    if (!connected && !(await connect())) return;
     setRunning(true);
     setLog([]);
     setStreaming("");
     append({ kind: "user", text: prompt });
     try {
       const transcript = await runAgent({
-        client: createClaudeClient(), // no apiKey: the host injects it (injectSecret)
+        client: createModelClient(), // no apiKey: the host injects it (injectSecret)
         tools: toolset.tools,
         execute: toolset.execute,
         system: SYSTEM,
@@ -165,13 +135,13 @@ export default function CodingAgent() {
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
       </header>
 
-      {!hasKey && (
+      {!connected && (
         <div className="ca-key">
-          <button type="button" className="ca-keybtn" onClick={() => void addKey()}>
-            Add Anthropic API key
+          <button type="button" className="ca-keybtn" onClick={() => void connect()}>
+            {hasStoredKey ? `Connect ${provider.label} key` : `Add ${provider.label} key`}
           </button>
           <span className="ca-keyhint">
-            Stored by the host and injected per request — never held by this app.
+            Your stored {provider.label} key, injected by the host per request — never held by this app.
           </span>
         </div>
       )}
