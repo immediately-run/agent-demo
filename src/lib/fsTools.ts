@@ -67,10 +67,14 @@ function normalizePosix(p: string): string {
 }
 
 /** Resolve a model-supplied path against `root`, or `null` if it escapes the
- *  chroot. Accepts repo-relative (`src/App.tsx`) and in-root absolute paths. */
+ *  chroot. A model path is relative to the app's WORKSPACE, which the app sees as
+ *  `/` — the real mount path is never exposed to it. So a leading-slash path
+ *  (`/README.md`) means `<root>/README.md`, NOT a filesystem-absolute path; both
+ *  `src/App.tsx` and `/src/App.tsx` resolve under `root`, and anything that climbs
+ *  out via `..` is rejected (reads back as "not found", never a disclosure — T24). */
 function resolveWithin(root: string, rel: string): string | null {
   const base = normalizePosix(root);
-  const joined = rel.startsWith('/') ? normalizePosix(rel) : normalizePosix(`${base}/${rel}`);
+  const joined = normalizePosix(`${base}/${rel}`);
   if (joined !== base && !joined.startsWith(`${base}/`)) return null;
   return joined;
 }

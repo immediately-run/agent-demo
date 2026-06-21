@@ -86,6 +86,16 @@ describe('fsTools — mount-chroot filesystem tools (§3.3 phase 2)', () => {
     expect(miss).toEqual({ content: 'not found', isError: true });
   });
 
+  it('a leading-slash path is workspace-root-relative, not filesystem-absolute', async () => {
+    // The app sees its mount as "/"; "/package.json" means <root>/package.json,
+    // matching how models naturally address files (and how list_dir reports them).
+    const { execute } = ts(seed());
+    expect(await execute('read_file', { path: '/package.json' })).toEqual({ content: '{"name":"x"}' });
+    expect(await execute('read_file', { path: '/src/App.tsx' })).toEqual({
+      content: 'export default function App(){ return null }\nconst TODO = 1\n',
+    });
+  });
+
   it('write_file creates parents and writes; reports bytes', async () => {
     const fs = seed();
     const res = await ts(fs).execute('write_file', { path: 'src/new/x.ts', content: 'hello' });

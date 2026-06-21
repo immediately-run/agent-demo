@@ -8,15 +8,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useCatalog,
   useMounts,
-  useSecrets,
   getAppMountPath,
-  requestAddSecret,
   postToRegion,
   onRegionMessage,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
-import { createClaudeClient } from "../lib/claudeClient";
+import { createModelClient } from "../lib/modelClient";
+import { useProviderConnection } from "../lib/useProviderConnection";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -35,14 +34,13 @@ const SYSTEM =
 export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
-  const secrets = useSecrets();
+  const { provider, connected, hasStoredKey, keyMsg, connect } = useProviderConnection();
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
-  const [keyMsg, setKeyMsg] = useState<string | null>(null);
   const [title, setTitle] = useState<string>("");
 
   const toolset = useMemo(() => {
@@ -51,12 +49,6 @@ export default function ConversationStage() {
     const fsTools = createFsToolset({ root, readOnly: appMount?.mode === "ro" });
     return mergeToolsets(catalogToolset(catalog), fsTools);
   }, [catalog, mounts]);
-
-  const hasKey = secrets.some(
-    (s) =>
-      s.type === "api-key" &&
-      (s.family === "anthropic" || (s.boundOrigin ?? "").includes("anthropic.com")),
-  );
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
@@ -105,29 +97,11 @@ export default function ConversationStage() {
     });
   }, [loadConversation]);
 
-  const addKey = async () => {
-    setKeyMsg(null);
-    try {
-      await requestAddSecret({
-        type: "api-key",
-        family: "anthropic",
-        suggestedOrigin: "https://api.anthropic.com",
-        description: "Anthropic API key for the coding agent",
-      });
-    } catch (e) {
-      const code = (e as { code?: string })?.code;
-      setKeyMsg(
-        code === "cancelled"
-          ? "Key setup cancelled."
-          : code === "forbidden"
-            ? "This app can't manage secrets here; add an Anthropic key in host settings."
-            : `Couldn't add key: ${(e as Error)?.message ?? String(e)}`,
-      );
-    }
-  };
-
   const run = async () => {
     if (!prompt.trim() || running) return;
+    // Bind the provider key to this app before the first call (browser-direct
+    // injectSecret needs the use-grant or the host refuses the fetch).
+    if (!connected && !(await connect())) return;
     const store = storeRef.current;
     // Ensure a conversation exists to attach this run to.
     let conv = convRef.current;
@@ -148,7 +122,7 @@ export default function ConversationStage() {
     append({ kind: "user", text: kickoff });
     try {
       const transcript = await runAgent({
-        client: createClaudeClient(),
+        client: createModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
         system: SYSTEM,
@@ -189,13 +163,13 @@ export default function ConversationStage() {
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
       </header>
 
-      {!hasKey && (
+      {!connected && (
         <div className="ca-key">
-          <button type="button" className="ca-keybtn" onClick={() => void addKey()}>
-            Add Anthropic API key
+          <button type="button" className="ca-keybtn" onClick={() => void connect()}>
+            {hasStoredKey ? `Connect ${provider.label} key` : `Add ${provider.label} key`}
           </button>
           <span className="ca-keyhint">
-            Stored by the host and injected per request — never held by this app.
+            Your stored {provider.label} key, injected by the host per request — never held by this app.
           </span>
         </div>
       )}

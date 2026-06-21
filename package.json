@@ -17,7 +17,20 @@
     ],
     "requests": {
       "net:fetch": {
+        "required": true,
         "hosts": [
+          {
+            "origin": "https://openrouter.ai",
+            "paths": [
+              "/api/v1/"
+            ],
+            "methods": [
+              "POST"
+            ],
+            "injectSecret": {
+              "type": "bearer-token"
+            }
+          },
           {
             "origin": "https://api.anthropic.com",
             "paths": [
