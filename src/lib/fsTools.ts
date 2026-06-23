@@ -55,7 +55,7 @@ const WALK_CAP = 5000; // files visited by a glob/grep walk
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage']);
 
 /** Collapse `.`/`..` segments in a POSIX path (no fs access). */
-function normalizePosix(p: string): string {
+export function normalizePosix(p: string): string {
   const isAbs = p.startsWith('/');
   const out: string[] = [];
   for (const seg of p.split('/')) {
@@ -72,7 +72,7 @@ function normalizePosix(p: string): string {
  *  (`/README.md`) means `<root>/README.md`, NOT a filesystem-absolute path; both
  *  `src/App.tsx` and `/src/App.tsx` resolve under `root`, and anything that climbs
  *  out via `..` is rejected (reads back as "not found", never a disclosure — T24). */
-function resolveWithin(root: string, rel: string): string | null {
+export function resolveWithin(root: string, rel: string): string | null {
   const base = normalizePosix(root);
   const joined = normalizePosix(`${base}/${rel}`);
   if (joined !== base && !joined.startsWith(`${base}/`)) return null;
