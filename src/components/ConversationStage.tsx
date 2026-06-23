@@ -14,6 +14,8 @@ import {
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
+import { createProjectToolset } from "../lib/projectTools";
+import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createModelClient } from "../lib/modelClient";
 import { useProviderConnection } from "../lib/useProviderConnection";
 import { runAgent } from "../lib/agentLoop";
@@ -22,14 +24,6 @@ import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import "./CodingAgent.css";
-
-const SYSTEM =
-  "You are a coding agent embedded in an immediately.run app. You have two kinds " +
-  "of tools: filesystem tools (read_file, write_file, list_dir, stat, glob, grep, " +
-  "delete_file) scoped to this app's workspace, and platform methods this app has " +
-  "been granted. Explore with list_dir/glob/grep before editing, make focused " +
-  "edits with write_file, then stop. If a tool returns `forbidden`, the app lacks " +
-  "that grant — do not retry it; explain what's missing instead.";
 
 export default function ConversationStage() {
   const catalog = useCatalog();
@@ -46,8 +40,10 @@ export default function ConversationStage() {
   const toolset = useMemo(() => {
     const root = getAppMountPath();
     const appMount = mounts.find((m) => m.path === root);
-    const fsTools = createFsToolset({ root, readOnly: appMount?.mode === "ro" });
-    return mergeToolsets(catalogToolset(catalog), fsTools);
+    const readOnly = appMount?.mode === "ro";
+    const fsTools = createFsToolset({ root, readOnly });
+    const projectTools = createProjectToolset({ root, readOnly });
+    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);
   }, [catalog, mounts]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
@@ -125,7 +121,7 @@ export default function ConversationStage() {
         client: createModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: SYSTEM,
+        system: SYSTEM_PROMPT,
         history,
         prompt: kickoff,
         events: {
