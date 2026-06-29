@@ -16,36 +16,7 @@
       }
     ],
     "requests": {
-      "net:fetch": {
-        "required": true,
-        "hosts": [
-          {
-            "origin": "https://openrouter.ai",
-            "paths": [
-              "/api/v1/"
-            ],
-            "methods": [
-              "POST"
-            ],
-            "injectSecret": {
-              "type": "bearer-token"
-            }
-          },
-          {
-            "origin": "https://api.anthropic.com",
-            "paths": [
-              "/v1/"
-            ],
-            "methods": [
-              "POST"
-            ],
-            "injectSecret": {
-              "family": "anthropic",
-              "type": "api-key"
-            }
-          }
-        ]
-      }
+      "llm:chat": {}
     }
   },
   "scripts": {
@@ -56,7 +27,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.13.0",
+    "@immediately-run/sdk": "^0.18.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

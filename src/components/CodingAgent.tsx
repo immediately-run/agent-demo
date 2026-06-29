@@ -6,18 +6,17 @@
 // this app's catalog or files inside its mount chroot; anything else returns
 // `forbidden`/`not found`.
 //
-// The LLM key is host-mediated (SECRETS_SPEC §6): the app never holds it — the
-// host injects `x-api-key` from the `injectSecret` rule declared in package.json.
-// If the user hasn't stored an Anthropic key yet, we offer the host's "add secret"
-// modal (the value is typed into host chrome, never here).
+// Inference goes through the platform `llm.chat` service (SDK `chat()`): the app
+// names no vendor and no model and holds no key — the host injects the user's key and
+// resolves the user's preferred provider/model (AGENT_AUTHORING_ARCHITECTURE §3; H2
+// favours chat() over net:fetch+secrets). Needs only the `llm:chat` capability.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCatalog, useMounts, getAppMountPath } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
-import { createModelClient } from "../lib/modelClient";
-import { useProviderConnection } from "../lib/useProviderConnection";
+import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -31,9 +30,6 @@ export default function CodingAgent() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
-  // Provider-key connection (default OpenRouter): `connect` binds the user's
-  // stored key to this app before the first model call (see the hook).
-  const { provider, connected, hasStoredKey, keyMsg, connect } = useProviderConnection();
 
   // Persistence (Phase 01): keep this run in a durable conversation so it survives
   // reload. Best-effort — `openSettings()` is inert in local dev / signed out, so a
@@ -76,17 +72,13 @@ export default function CodingAgent() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
-    // Ensure the provider key is bound to this app before the first call — the
-    // browser-direct injectSecret path needs the use-grant or the host refuses
-    // the fetch ("outside manifest ∩ grant allowlist").
-    if (!connected && !(await connect())) return;
     setRunning(true);
     setLog([]);
     setStreaming("");
     append({ kind: "user", text: prompt });
     try {
       const transcript = await runAgent({
-        client: createModelClient(), // no apiKey: the host injects it (injectSecret)
+        client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
         system: SYSTEM_PROMPT,
@@ -130,18 +122,6 @@ export default function CodingAgent() {
         <span className="ca-title">Coding agent</span>
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files + project)</span>
       </header>
-
-      {!connected && (
-        <div className="ca-key">
-          <button type="button" className="ca-keybtn" onClick={() => void connect()}>
-            {hasStoredKey ? `Connect ${provider.label} key` : `Add ${provider.label} key`}
-          </button>
-          <span className="ca-keyhint">
-            Your stored {provider.label} key, injected by the host per request — never held by this app.
-          </span>
-        </div>
-      )}
-      {keyMsg && <div className="ca-keymsg">{keyMsg}</div>}
 
       <div className="ca-prompt-row">
         <input

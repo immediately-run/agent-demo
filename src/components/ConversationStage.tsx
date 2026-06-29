@@ -16,8 +16,7 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
-import { createModelClient } from "../lib/modelClient";
-import { useProviderConnection } from "../lib/useProviderConnection";
+import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -28,7 +27,6 @@ import "./CodingAgent.css";
 export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
-  const { provider, connected, hasStoredKey, keyMsg, connect } = useProviderConnection();
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -95,9 +93,6 @@ export default function ConversationStage() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
-    // Bind the provider key to this app before the first call (browser-direct
-    // injectSecret needs the use-grant or the host refuses the fetch).
-    if (!connected && !(await connect())) return;
     const store = storeRef.current;
     // Ensure a conversation exists to attach this run to.
     let conv = convRef.current;
@@ -118,7 +113,7 @@ export default function ConversationStage() {
     append({ kind: "user", text: kickoff });
     try {
       const transcript = await runAgent({
-        client: createModelClient(),
+        client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
         system: SYSTEM_PROMPT,
@@ -158,18 +153,6 @@ export default function ConversationStage() {
         <span className="ca-title">{title || "Conversation"}</span>
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
       </header>
-
-      {!connected && (
-        <div className="ca-key">
-          <button type="button" className="ca-keybtn" onClick={() => void connect()}>
-            {hasStoredKey ? `Connect ${provider.label} key` : `Add ${provider.label} key`}
-          </button>
-          <span className="ca-keyhint">
-            Your stored {provider.label} key, injected by the host per request — never held by this app.
-          </span>
-        </div>
-      )}
-      {keyMsg && <div className="ca-keymsg">{keyMsg}</div>}
 
       <ul className="ca-log" aria-live="polite">
         {log.map((e, i) => (
