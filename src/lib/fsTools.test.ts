@@ -1,5 +1,39 @@
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, type FsLike, type FsDirent, type FsStat } from './fsTools';
+import { createFsToolset, resolveWorkingTreeMount, type FsLike, type FsDirent, type FsStat } from './fsTools';
+
+// AA-23: the workbench agent must author the STAGE app's conferred working tree
+// (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
+// that made it read `not found` for every grove path.
+describe('resolveWorkingTreeMount', () => {
+  const OWN = '/mnt/own-agent-repo';
+
+  it('targets the conferred stage-app worktree by identity (rw), not the agent\'s own repo', () => {
+    const mounts = [
+      { path: OWN, type: 'repo', mode: 'rw' as const },
+      { path: '/mnt/stage-grove', type: 'worktree', mode: 'rw' as const },
+    ];
+    expect(resolveWorkingTreeMount(mounts, OWN)).toEqual({ root: '/mnt/stage-grove', readOnly: false });
+  });
+
+  it('honors a read-only conferred worktree', () => {
+    const mounts = [{ path: '/mnt/stage-grove', type: 'worktree', mode: 'ro' as const }];
+    expect(resolveWorkingTreeMount(mounts, OWN)).toEqual({ root: '/mnt/stage-grove', readOnly: true });
+  });
+
+  it('falls back to the agent\'s own repo when no worktree is conferred (standalone agent)', () => {
+    const mounts = [{ path: OWN, type: 'repo', mode: 'rw' as const }];
+    expect(resolveWorkingTreeMount(mounts, OWN)).toEqual({ root: OWN, readOnly: false });
+  });
+
+  it('fallback reports read-only when the own repo is ro', () => {
+    const mounts = [{ path: OWN, type: 'repo', mode: 'ro' as const }];
+    expect(resolveWorkingTreeMount(mounts, OWN)).toEqual({ root: OWN, readOnly: true });
+  });
+
+  it('fallback to appMountPath even when the own mount is absent from the list', () => {
+    expect(resolveWorkingTreeMount([], OWN)).toEqual({ root: OWN, readOnly: false });
+  });
+});
 
 // A tiny in-memory fs implementing the FsLike subset the tools use. Paths are
 // absolute POSIX. Good enough to exercise chroot resolution, walking, and the

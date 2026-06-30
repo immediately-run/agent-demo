@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCatalog, useMounts, getAppMountPath } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
-import { createFsToolset } from "../lib/fsTools";
+import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
@@ -57,12 +57,12 @@ export default function CodingAgent() {
     };
   }, []);
 
-  // Merge the platform catalog with filesystem + project tools chrooted to the
-  // app's working tree. Re-derived when grants or the mount's writability change.
+  // Merge the platform catalog with filesystem + project tools chrooted to the working
+  // tree. When a stage app's tree is conferred (`type:'worktree'`, AA-23) author THAT;
+  // otherwise (standalone agent) fall back to this app's own repo. Re-derived when the
+  // conferred mount or its writability changes.
   const toolset = useMemo(() => {
-    const root = getAppMountPath();
-    const appMount = mounts.find((m) => m.path === root);
-    const readOnly = appMount?.mode === "ro";
+    const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);

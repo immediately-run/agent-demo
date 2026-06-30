@@ -36,6 +36,38 @@ export interface FsStat {
   isFile(): boolean;
 }
 
+/** The mount fields this resolver reads (a narrow slice of the SDK `SandboxMount`). */
+export interface MountInfo {
+  path: string;
+  type?: string;
+  mode?: 'ro' | 'rw';
+}
+
+/**
+ * Resolve which working tree the agent should author, and whether it is read-only.
+ *
+ * AA-23 (AGENT_AUTHORING_ARCHITECTURE §3.0): when this agent is the **workbench**
+ * (bound to `stage.conversation`), the host confers the STAGE app's working tree as a
+ * `type:'worktree'` mount (site-main `exposesWorkingTree`), scoped + mode-clamped to
+ * the source — a *separate* app authoring a *different* app's tree (the editor's
+ * cross-repo grant kind). We select it by **identity** (`type === 'worktree'`), exactly
+ * as the editor's `resolveWorkingTreeRoot` does — only the conferred session tree ever
+ * carries that type, never the agent's own dual-mounted repo.
+ *
+ * Fallback: when no working tree is conferred (the standalone `CodingAgent`, or a
+ * mis-configured binding), chroot to the agent's OWN repo (`appMountPath`) so it
+ * degrades to self-edit rather than reading `not found` for every path.
+ */
+export function resolveWorkingTreeMount(
+  mounts: readonly MountInfo[],
+  appMountPath: string,
+): { root: string; readOnly: boolean } {
+  const worktree = mounts.find((m) => m.type === 'worktree');
+  if (worktree) return { root: worktree.path, readOnly: worktree.mode === 'ro' };
+  const own = mounts.find((m) => m.path === appMountPath);
+  return { root: appMountPath, readOnly: own?.mode === 'ro' };
+}
+
 export interface FsToolsOptions {
   /** Absolute mount path the tools are chrooted to (e.g. the app working tree). */
   root: string;

@@ -13,7 +13,7 @@ import {
   onRegionMessage,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
-import { createFsToolset } from "../lib/fsTools";
+import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
@@ -35,10 +35,13 @@ export default function ConversationStage() {
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
 
+  // Chroot the fs/project tools to the STAGE app's working tree — the host confers it
+  // as a `type:'worktree'` mount (AA-23). NOT `getAppMountPath()`, which is the agent's
+  // OWN repo: targeting that made the workbench author itself, so every stage-app path
+  // read `not found`. Re-derived when the conferred mount changes (e.g. the user
+  // switches which app is loaded → the prior port is torn down, a new one minted).
   const toolset = useMemo(() => {
-    const root = getAppMountPath();
-    const appMount = mounts.find((m) => m.path === root);
-    const readOnly = appMount?.mode === "ro";
+    const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);
