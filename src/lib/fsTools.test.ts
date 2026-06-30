@@ -108,9 +108,9 @@ const seed = () =>
 const ts = (fs: MemFs, readOnly = false) => createFsToolset({ root: '/app', fs, readOnly });
 
 describe('fsTools — mount-chroot filesystem tools (§3.3 phase 2)', () => {
-  it('exposes the seven file tools', () => {
+  it('exposes the eight file tools', () => {
     const names = ts(seed()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['delete_file', 'glob', 'grep', 'list_dir', 'read_file', 'stat', 'write_file']);
+    expect(names).toEqual(['delete_file', 'edit_file', 'glob', 'grep', 'list_dir', 'read_file', 'stat', 'write_file']);
   });
 
   it('read_file returns content; missing path → not found', async () => {
@@ -191,5 +191,89 @@ describe('fsTools — mount-chroot filesystem tools (§3.3 phase 2)', () => {
     const res = await ts(seed()).execute('rm_rf', {});
     expect(res).toMatchObject({ isError: true });
     expect(res.content).toContain('forbidden');
+  });
+});
+
+// edit_file — the surgical string-replace that lets the agent change part of a large
+// file without regenerating the whole thing (the fix for the big-file write_file stall).
+describe('edit_file', () => {
+  it('replaces a unique snippet in place without rewriting the whole file', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: '(a:number,b:number)=>a+b',
+      new_string: '(a:number,b:number)=>a + b',
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('1 replacement');
+    expect(fs.files.get('/app/src/lib/util.ts')).toBe('export const add = (a:number,b:number)=>a + b // TODO refactor\n');
+  });
+
+  it('inserts by anchoring: old_string → anchor + addition (large-file insert)', async () => {
+    const fs = seed();
+    // Simulate adding a CSS rule after an existing one without resending the file.
+    fs.put('/app/src/GroveApp.css', '.grove-quote { color: red; }\n/* code block */\n');
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/GroveApp.css',
+      old_string: '.grove-quote { color: red; }\n',
+      new_string: '.grove-quote { color: red; }\n.grove-keyvalue { margin: 1rem 0; }\n',
+    });
+    expect(res.isError).toBeUndefined();
+    expect(fs.files.get('/app/src/GroveApp.css')).toBe(
+      '.grove-quote { color: red; }\n.grove-keyvalue { margin: 1rem 0; }\n/* code block */\n',
+    );
+  });
+
+  it('inserts new_string verbatim — `$` and backslashes are not special (no String.replace pattern surprises)', async () => {
+    const fs = seed();
+    fs.put('/app/src/money.ts', 'const a = MARK;\n');
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/money.ts',
+      old_string: 'MARK',
+      new_string: "'$1 \\n $& cost'",
+    });
+    expect(res.isError).toBeUndefined();
+    expect(fs.files.get('/app/src/money.ts')).toBe("const a = '$1 \\n $& cost';\n");
+  });
+
+  it('refuses a non-unique old_string unless replace_all is set', async () => {
+    const fs = seed();
+    fs.put('/app/dup.txt', 'x\nx\nx\n');
+    const ambiguous = await ts(fs).execute('edit_file', { path: 'dup.txt', old_string: 'x', new_string: 'y' });
+    expect(ambiguous).toMatchObject({ isError: true });
+    expect(ambiguous.content).toContain('not unique');
+    expect(fs.files.get('/app/dup.txt')).toBe('x\nx\nx\n'); // untouched on refusal
+
+    const all = await ts(fs).execute('edit_file', { path: 'dup.txt', old_string: 'x', new_string: 'y', replace_all: true });
+    expect(all.isError).toBeUndefined();
+    expect(all.content).toContain('3 replacements');
+    expect(fs.files.get('/app/dup.txt')).toBe('y\ny\ny\n');
+  });
+
+  it('errors when old_string is not found, leaving the file untouched', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', { path: 'package.json', old_string: 'nope', new_string: 'x' });
+    expect(res).toMatchObject({ isError: true });
+    expect(res.content).toContain('not found');
+    expect(fs.files.get('/app/package.json')).toBe('{"name":"x"}');
+  });
+
+  it('rejects an empty old_string and a no-op (old === new)', async () => {
+    const { execute } = ts(seed());
+    expect(await execute('edit_file', { path: 'package.json', old_string: '', new_string: 'x' })).toMatchObject({ isError: true });
+    expect(await execute('edit_file', { path: 'package.json', old_string: 'x', new_string: 'x' })).toMatchObject({ isError: true });
+  });
+
+  it('refuses on a read-only mount and never writes', async () => {
+    const fs = seed();
+    const res = await ts(fs, true).execute('edit_file', { path: 'package.json', old_string: 'x', new_string: 'y' });
+    expect(res).toMatchObject({ isError: true });
+    expect(res.content).toContain('read-only');
+    expect(fs.files.get('/app/package.json')).toBe('{"name":"x"}');
+  });
+
+  it('cannot escape the chroot', async () => {
+    const res = await ts(seed()).execute('edit_file', { path: '../etc/secret', old_string: 'TOPSECRET', new_string: 'leak' });
+    expect(res).toEqual({ content: 'not found', isError: true });
   });
 });

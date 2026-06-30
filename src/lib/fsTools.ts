@@ -211,6 +211,51 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       }
     },
 
+    // Surgical edit: replace an exact snippet without rewriting the whole file.
+    // The reason this tool exists — `write_file` is whole-file overwrite, so editing
+    // a large existing file (e.g. a 50KB shared stylesheet) means faithfully
+    // regenerating every byte, which models won't do; they loop hunting for an
+    // "insertion point" `write_file` can't express. `edit_file` is the editor's
+    // string-replace: supply a unique `old_string` + its `new_string`.
+    async edit_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      const abs = resolveWithin(root, String(input.path ?? ''));
+      if (!abs) return notFound;
+      const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
+      const newStr = typeof input.new_string === 'string' ? input.new_string : '';
+      if (!oldStr) return { content: 'edit_file requires a non-empty "old_string"', isError: true };
+      if (oldStr === newStr) return { content: '"old_string" and "new_string" are identical — nothing to do', isError: true };
+      const replaceAll = input.replace_all === true;
+      let text: string;
+      try {
+        text = await p.readFile(abs, 'utf8');
+      } catch (e) {
+        return fsError(e);
+      }
+      // Count via split (no regex — `old_string` is a literal, and a `$`/`\` in
+      // `new_string` must NOT be reinterpreted the way String.replace would).
+      const count = text.split(oldStr).length - 1;
+      if (count === 0) return { content: 'old_string not found — it must match the file exactly (whitespace included)', isError: true };
+      if (count > 1 && !replaceAll) {
+        return { content: `old_string is not unique (${count} matches) — add surrounding context to make it unique, or pass replace_all: true`, isError: true };
+      }
+      let next: string;
+      if (replaceAll) {
+        next = text.split(oldStr).join(newStr);
+      } else {
+        const at = text.indexOf(oldStr);
+        next = text.slice(0, at) + newStr + text.slice(at + oldStr.length);
+      }
+      try {
+        await p.writeFile(abs, next);
+      } catch (e) {
+        return fsError(e);
+      }
+      const delta = next.length - text.length;
+      const where = replaceAll ? `${count} replacements` : '1 replacement';
+      return { content: `edited ${rel(abs)} (${where}, ${delta >= 0 ? '+' : ''}${delta} bytes)` };
+    },
+
     async list_dir(input) {
       const abs = resolveWithin(root, String(input.path ?? '.'));
       if (!abs) return notFound;
@@ -305,7 +350,8 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
 
   const tools: Toolset['tools'] = [
     { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
-    { name: 'write_file', description: 'Create or overwrite a workspace file (parent dirs are created). Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
+    { name: 'write_file', description: 'Create or **overwrite** a whole workspace file (parent dirs are created). Use for NEW files or full rewrites. To change part of an EXISTING file, prefer `edit_file` — do not regenerate a large file just to add a few lines. Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
+    { name: 'edit_file', description: 'Make a surgical edit to an existing file by replacing an exact snippet — the right tool for changing or adding a few lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' } }) },
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },
     { name: 'stat', description: 'Stat a workspace path: returns its type, size, and mtime.', input_schema: obj({ path: str('Workspace-relative path.') }) },
     { name: 'glob', description: 'Find workspace files matching a glob (`**`, `*`, `?`), e.g. "src/**/*.ts".', input_schema: obj({ pattern: str('Glob pattern, workspace-relative.') }) },
