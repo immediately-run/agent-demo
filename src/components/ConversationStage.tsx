@@ -13,7 +13,7 @@ import {
   onRegionMessage,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
-import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
+import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
@@ -35,17 +35,23 @@ export default function ConversationStage() {
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
 
-  // Chroot the fs/project tools to the STAGE app's working tree — the host confers it
-  // as a `type:'worktree'` mount (AA-23). NOT `getAppMountPath()`, which is the agent's
-  // OWN repo: targeting that made the workbench author itself, so every stage-app path
-  // read `not found`. Re-derived when the conferred mount changes (e.g. the user
-  // switches which app is loaded → the prior port is torn down, a new one minted).
+  // The STAGE app's working tree, conferred by the host as a `type:'worktree'` mount
+  // (AA-23) — NOT the agent's OWN repo. If it isn't conferred (the mount hasn't arrived,
+  // churned away, or no app is loaded), this is `null` and we MUST NOT fall back to the
+  // agent's own repo: doing so made the workbench silently author *itself* (every
+  // stage-app path read `not found`, and the model floundered). Re-derived when the
+  // conferred mount changes (switching the loaded app tears down the old port, mints new).
+  const stageTree = useMemo(() => findConferredWorktree(mounts, getAppMountPath()), [mounts]);
+
+  // Tools given to the model. Without the stage tree the agent gets the catalog ONLY —
+  // no filesystem tools — so it can never edit the wrong (its own) repo. Run is gated
+  // below and a "workspace not ready" notice is shown.
   const toolset = useMemo(() => {
-    const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
-    const fsTools = createFsToolset({ root, readOnly });
-    const projectTools = createProjectToolset({ root, readOnly });
+    if (!stageTree) return catalogToolset(catalog);
+    const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
+    const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);
-  }, [catalog, mounts]);
+  }, [catalog, stageTree]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
@@ -96,6 +102,18 @@ export default function ConversationStage() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
+    // Refuse rather than author the wrong tree: with no conferred stage-app working
+    // tree, the agent has no filesystem tools, so a "build me X" prompt would either
+    // do nothing or (pre-fix) silently edit the agent's own repo. Tell the user.
+    if (!stageTree) {
+      append({ kind: "user", text: prompt });
+      append({
+        kind: "error",
+        text: "No app workspace is connected yet. Open an app in the stage (and give it a moment to mount) before asking me to edit it — I won't touch my own files.",
+      });
+      setPrompt("");
+      return;
+    }
     const store = storeRef.current;
     // Ensure a conversation exists to attach this run to.
     let conv = convRef.current;
@@ -154,8 +172,19 @@ export default function ConversationStage() {
     <div className="ca">
       <header className="ca-hd">
         <span className="ca-title">{title || "Conversation"}</span>
-        <span className="ca-sub">{toolset.tools.length} tools (catalog + files)</span>
+        <span className="ca-sub">
+          {toolset.tools.length} tools {stageTree ? "(catalog + files)" : "(catalog only)"}
+        </span>
       </header>
+
+      {!stageTree && (
+        <div className="ca-line ca-error" role="status">
+          <span className="ca-err">
+            Waiting for the app's workspace to connect… file tools are unavailable until then
+            (I won't edit my own files).
+          </span>
+        </div>
+      )}
 
       <ul className="ca-log" aria-live="polite">
         {log.map((e, i) => (
@@ -193,7 +222,13 @@ export default function ConversationStage() {
           }}
           aria-label="Prompt"
         />
-        <button type="button" className="ca-run" disabled={running} onClick={() => void run()}>
+        <button
+          type="button"
+          className="ca-run"
+          disabled={running || !stageTree}
+          title={!stageTree ? "Waiting for the app's workspace to connect" : undefined}
+          onClick={() => void run()}
+        >
           {running ? "Running…" : "Run"}
         </button>
       </div>

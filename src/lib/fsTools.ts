@@ -44,26 +44,39 @@ export interface MountInfo {
 }
 
 /**
- * Resolve which working tree the agent should author, and whether it is read-only.
+ * The **conferred stage-app working tree** — the `type:'worktree'` mount the host
+ * attaches for the workbench (AA-23 / `exposesWorkingTree`), or `null` if none is
+ * conferred yet.
  *
- * AA-23 (AGENT_AUTHORING_ARCHITECTURE §3.0): when this agent is the **workbench**
- * (bound to `stage.conversation`), the host confers the STAGE app's working tree as a
- * `type:'worktree'` mount (site-main `exposesWorkingTree`), scoped + mode-clamped to
- * the source — a *separate* app authoring a *different* app's tree (the editor's
- * cross-repo grant kind). We select it by **identity** (`type === 'worktree'`), exactly
- * as the editor's `resolveWorkingTreeRoot` does — only the conferred session tree ever
- * carries that type, never the agent's own dual-mounted repo.
+ * We select by identity (`type === 'worktree'`) AND **exclude the agent's own mount**
+ * (`m.path !== appMountPath`): the agent's own repo can also surface as a worktree (its
+ * dual mount, or — under a `--region` dev-override — the local dev-source tree), and
+ * picking it makes the workbench author *itself*. Returning the agent's own tree here is
+ * never correct for the stage agent, so this function refuses to.
+ */
+export function findConferredWorktree(
+  mounts: readonly MountInfo[],
+  appMountPath: string,
+): { root: string; readOnly: boolean } | null {
+  const m = mounts.find((m) => m.type === 'worktree' && m.path !== appMountPath);
+  return m ? { root: m.path, readOnly: m.mode === 'ro' } : null;
+}
+
+/**
+ * Resolve which working tree to author, with a **self-fallback** — for the *standalone*
+ * `CodingAgent`, which legitimately edits its OWN app. Prefer the conferred stage tree
+ * (so a standalone agent that *is* given one uses it); else the agent's own repo.
  *
- * Fallback: when no working tree is conferred (the standalone `CodingAgent`, or a
- * mis-configured binding), chroot to the agent's OWN repo (`appMountPath`) so it
- * degrades to self-edit rather than reading `not found` for every path.
+ * The **stage** agent (`ConversationStage`) must NOT use this — it uses
+ * {@link findConferredWorktree} and refuses when null, rather than silently authoring
+ * itself (which read `not found` for every stage-app path and confused the model).
  */
 export function resolveWorkingTreeMount(
   mounts: readonly MountInfo[],
   appMountPath: string,
 ): { root: string; readOnly: boolean } {
-  const worktree = mounts.find((m) => m.type === 'worktree');
-  if (worktree) return { root: worktree.path, readOnly: worktree.mode === 'ro' };
+  const conferred = findConferredWorktree(mounts, appMountPath);
+  if (conferred) return conferred;
   const own = mounts.find((m) => m.path === appMountPath);
   return { root: appMountPath, readOnly: own?.mode === 'ro' };
 }
