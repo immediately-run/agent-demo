@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, resolveWorkingTreeMount, type FsLike, type FsDirent, type FsStat } from './fsTools';
+import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, type FsLike, type FsDirent, type FsStat } from './fsTools';
 
 // AA-23: the workbench agent must author the STAGE app's conferred working tree
 // (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
 // that made it read `not found` for every grove path.
-describe('resolveWorkingTreeMount', () => {
+describe('resolveWorkingTreeMount (standalone, self-fallback)', () => {
   const OWN = '/mnt/own-agent-repo';
 
   it('targets the conferred stage-app worktree by identity (rw), not the agent\'s own repo', () => {
@@ -32,6 +32,32 @@ describe('resolveWorkingTreeMount', () => {
 
   it('fallback to appMountPath even when the own mount is absent from the list', () => {
     expect(resolveWorkingTreeMount([], OWN)).toEqual({ root: OWN, readOnly: false });
+  });
+});
+
+// The stage agent uses findConferredWorktree and REFUSES (null) rather than ever
+// authoring its own repo — the fix for the "silently authors itself" failure.
+describe('findConferredWorktree (stage agent — never self)', () => {
+  const OWN = '/mnt/own-agent-repo';
+
+  it('returns the conferred stage tree (a worktree that is NOT the agent\'s own)', () => {
+    const mounts = [
+      { path: OWN, type: 'worktree', mode: 'rw' as const }, // the agent's OWN dual-mount
+      { path: '/mnt/stage-grove', type: 'worktree', mode: 'rw' as const },
+    ];
+    // Even though BOTH are worktrees, it must pick the one that isn't the agent's own.
+    expect(findConferredWorktree(mounts, OWN)).toEqual({ root: '/mnt/stage-grove', readOnly: false });
+  });
+
+  it('returns null when the ONLY worktree is the agent\'s own (collision → no stage tree)', () => {
+    // The dev-override / dual-mount case that made the workbench author itself.
+    const mounts = [{ path: OWN, type: 'worktree', mode: 'rw' as const }];
+    expect(findConferredWorktree(mounts, OWN)).toBeNull();
+  });
+
+  it('returns null when no worktree is conferred at all (does NOT fall back to self)', () => {
+    expect(findConferredWorktree([{ path: OWN, type: 'repo', mode: 'rw' as const }], OWN)).toBeNull();
+    expect(findConferredWorktree([], OWN)).toBeNull();
   });
 });
 
