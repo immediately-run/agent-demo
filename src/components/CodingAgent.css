@@ -101,3 +101,10 @@
   white-space: pre-wrap;
   font-weight: 600;
 }
+/* Host-injected stall backstop (§2): a muted, italic aside — clearly not the
+   user talking and not a tool call, just the loop keeping a stalled turn moving. */
+.ca-nudge {
+  color: #a78bfa;
+  font-style: italic;
+  opacity: 0.85;
+}

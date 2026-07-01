@@ -92,6 +92,7 @@ export default function CodingAgent() {
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
           onToolResult: (name, r) =>
             append({ kind: "result", name, content: r.content, isError: r.isError }),
+          onNudge: () => append({ kind: "nudge" }),
         },
       });
       await persist(transcript);
@@ -156,6 +157,9 @@ export default function CodingAgent() {
               </span>
             )}
             {e.kind === "error" && <span className="ca-err">{e.text}</span>}
+            {e.kind === "nudge" && (
+              <span className="ca-nudge">↺ nudging the model to continue…</span>
+            )}
           </li>
         ))}
         {streaming && (

@@ -4,14 +4,18 @@
 //
 // Types + a pure function only (no component) — safe to import anywhere.
 
-import type { ChatMessage } from './agentLoop';
+import { NUDGE_TEXT, type ChatMessage } from './agentLoop';
 
 export type LogEntry =
   | { kind: 'user'; text: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; input: Record<string, unknown> }
   | { kind: 'result'; name: string; content: string; isError?: boolean }
-  | { kind: 'error'; text: string };
+  | { kind: 'error'; text: string }
+  // A host-injected stall backstop (§2): the loop nudged a no-tool-call turn. Its
+  // wire form is a `user` text message, so it must be classified here (not shown as
+  // something the user typed) — both live (onNudge) and on replay.
+  | { kind: 'nudge' };
 
 /** Flatten a transcript into log entries. Tool results are correlated back to the
  *  tool name via the assistant `tool_use` id that produced them. */
@@ -21,7 +25,8 @@ export function messagesToLog(messages: ChatMessage[]): LogEntry[] {
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'text') {
-        if (block.text.trim()) out.push({ kind: msg.role === 'user' ? 'user' : 'text', text: block.text });
+        if (msg.role === 'user' && block.text === NUDGE_TEXT) out.push({ kind: 'nudge' });
+        else if (block.text.trim()) out.push({ kind: msg.role === 'user' ? 'user' : 'text', text: block.text });
       } else if (block.type === 'tool_use') {
         nameById.set(block.id, block.name);
         out.push({ kind: 'tool', name: block.name, input: block.input });
