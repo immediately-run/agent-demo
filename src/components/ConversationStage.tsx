@@ -148,6 +148,7 @@ export default function ConversationStage() {
           },
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
           onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
+          onNudge: () => append({ kind: "nudge" }),
         },
       });
       if (conv && store) {
@@ -202,6 +203,9 @@ export default function ConversationStage() {
               </span>
             )}
             {e.kind === "error" && <span className="ca-err">{e.text}</span>}
+            {e.kind === "nudge" && (
+              <span className="ca-nudge">↺ nudging the model to continue…</span>
+            )}
           </li>
         ))}
         {streaming && (
