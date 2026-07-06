@@ -15,6 +15,7 @@ import { useCatalog, useMounts, getAppMountPath } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
+import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
@@ -65,7 +66,8 @@ export default function CodingAgent() {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);
+    const diagnosticsTools = createDiagnosticsToolset();
+    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
   }, [catalog, mounts]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
@@ -121,7 +123,7 @@ export default function CodingAgent() {
     <div className="ca">
       <header className="ca-hd">
         <span className="ca-title">Coding agent</span>
-        <span className="ca-sub">{toolset.tools.length} tools (catalog + files + project)</span>
+        <span className="ca-sub">{toolset.tools.length} tools (catalog + files + project + diagnostics)</span>
       </header>
 
       <div className="ca-prompt-row">
