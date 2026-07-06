@@ -49,3 +49,47 @@ describe('catalog-as-tools (§3.3)', () => {
   // is covered by the off-catalog case above (same `{isError}` return) and by
   // agentLoop's "thrown executor error" test.
 });
+
+// R3-75 Phase 4 confinement invariant (T24/G12): the authoring tools
+// (authoring:typecheck|lint|format, gated by `authoring:run`) reach the model
+// through the SAME catalog path — no special wiring — so the tool list equals the
+// GRANTED catalog exactly. When the host grants `authoring:run` they appear; when
+// it doesn't (they never enter the grant-filtered catalog) they are absent from
+// the tool list AND a forced call returns `forbidden` without invoking the host.
+describe('authoring tools ride the catalog path (T24/G12)', () => {
+  const AUTHORING: ApiMethod[] = [
+    { name: 'authoring:typecheck', capability: 'authoring:run' },
+    { name: 'authoring:lint', capability: 'authoring:run' },
+    { name: 'authoring:format', capability: 'authoring:run' },
+  ];
+
+  it('surfaces the three authoring tools when the catalog carries authoring:run', () => {
+    const names = catalogToTools(AUTHORING).map((t) => t.name);
+    expect(names).toEqual(['authoring__typecheck', 'authoring__lint', 'authoring__format']);
+  });
+
+  it('the tool list is exactly the granted catalog — no authoring tool the gate would not admit', () => {
+    // Ungranted catalog: authoring:run absent → the three methods never appear.
+    const ungranted: ApiMethod[] = [{ name: 'spaces:share', capability: 'spaces:admin' }];
+    const names = catalogToTools(ungranted).map((t) => t.name);
+    expect(names).not.toContain('authoring__typecheck');
+    expect(names).not.toContain('authoring__lint');
+    expect(names).not.toContain('authoring__format');
+  });
+
+  it('routes a granted authoring call through the host gated invoke()', async () => {
+    invoke.mockResolvedValue({ diagnostics: [] });
+    const exec = createCatalogExecutor(AUTHORING);
+    const res = await exec('authoring__typecheck', { files: ['/src/App.tsx'] });
+    expect(invoke).toHaveBeenCalledWith('authoring:typecheck', { files: ['/src/App.tsx'] });
+    expect(res).toEqual({ content: '{"diagnostics":[]}' });
+  });
+
+  it('an ungranted authoring call is forbidden WITHOUT touching the host (G12)', async () => {
+    const exec = createCatalogExecutor([{ name: 'spaces:share', capability: 'spaces:admin' }]);
+    const res = await exec('authoring__format', { source: 'x', parser: 'typescript' });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('forbidden');
+  });
+});

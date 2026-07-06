@@ -15,6 +15,7 @@ import {
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
+import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { SYSTEM_PROMPT } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
@@ -50,7 +51,8 @@ export default function ConversationStage() {
     if (!stageTree) return catalogToolset(catalog);
     const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools);
+    const diagnosticsTools = createDiagnosticsToolset();
+    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
   }, [catalog, stageTree]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
