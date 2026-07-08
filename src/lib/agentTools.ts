@@ -7,16 +7,21 @@
 import { invoke, type ApiMethod } from '@immediately-run/sdk';
 
 /** An Anthropic-shaped tool descriptor (`name` + `description` for the model +
- *  JSON-Schema `input_schema`). */
+ *  JSON-Schema `input_schema`). The schema is a JSON Schema object — either the
+ *  method's advertised `paramsSchema` (self-describing) or a permissive fallback. */
 export interface AgentTool {
   name: string;
   description: string;
-  input_schema: {
-    type: 'object';
-    properties: Record<string, unknown>;
-    additionalProperties: boolean;
-  };
+  input_schema: Record<string, unknown>;
 }
+
+/** Fallback input schema for a method the host advertises without a `paramsSchema`:
+ *  a permissive "any object" (the host still validates params + gates the call). */
+const PERMISSIVE_INPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {},
+  additionalProperties: true,
+};
 
 // Anthropic tool names must match ^[a-zA-Z0-9_-]{1,64}$ — catalog names carry a
 // colon (`spaces:share`), which is invalid. Map `:` ⇄ `__` bijectively. (Catalog
@@ -27,9 +32,12 @@ export const toCatalogName = (toolName: string): string => toolName.replace(/__/
 /**
  * Build the model's tool list from the app's grant-filtered catalog. Streaming
  * methods (`stream:true`) are skipped — a one-shot tool-use call can't consume a
- * stream. The SDK `ApiMethod` carries no param schema, so the schema is
- * permissive (`additionalProperties:true`); the host validates params and gates
- * the call regardless.
+ * stream. When the host advertises a method's `paramsSchema` (§5.5, SDK 0.28+), it
+ * becomes the tool's `input_schema` so the model marshals structured params
+ * correctly — e.g. `authoring:typecheck`'s nested `{ files: [{ path, content }] }`
+ * array, which a permissive "any object" schema left the model to guess (and it
+ * mis-serialized as a string → the host's `invalid-params`). Methods without a
+ * schema keep the permissive fallback; the host validates + gates every call.
  */
 export function catalogToTools(catalog: ApiMethod[]): AgentTool[] {
   return catalog
@@ -39,8 +47,10 @@ export function catalogToTools(catalog: ApiMethod[]): AgentTool[] {
       description:
         `Platform method "${m.name}" (capability: ${m.capability}). ` +
         `Call it to perform this action on the user's behalf through the host. ` +
-        `Params are passed as a JSON object and validated host-side.`,
-      input_schema: { type: 'object', properties: {}, additionalProperties: true },
+        (m.paramsSchema
+          ? `Pass params matching this tool's input schema.`
+          : `Params are passed as a JSON object and validated host-side.`),
+      input_schema: m.paramsSchema ?? PERMISSIVE_INPUT_SCHEMA,
     }));
 }
 
