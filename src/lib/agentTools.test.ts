@@ -27,6 +27,35 @@ describe('catalog-as-tools (§3.3)', () => {
     expect(tools[0].name).toBe('spaces__share');
     expect(tools[0].description).toContain('spaces:share');
     expect(tools[0].input_schema.type).toBe('object');
+    // No advertised schema → permissive fallback (host still validates + gates).
+    expect(tools[0].input_schema.additionalProperties).toBe(true);
+  });
+
+  it("uses a method's advertised paramsSchema as the tool input_schema (R3-75)", () => {
+    // The fix for the nested-param marshalling gap: a self-describing method carries
+    // its JSON Schema, so the model emits a real array instead of guessing.
+    const filesSchema = {
+      type: 'object',
+      properties: {
+        files: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: { path: { type: 'string' }, content: { type: 'string' } },
+            required: ['path', 'content'],
+          },
+        },
+      },
+      required: ['files'],
+    };
+    const withSchema: ApiMethod[] = [
+      { name: 'authoring:typecheck', capability: 'authoring:run', paramsSchema: filesSchema },
+    ];
+    const [tool] = catalogToTools(withSchema);
+    expect(tool.name).toBe('authoring__typecheck');
+    expect(tool.input_schema).toEqual(filesSchema); // advertised schema wins
+    expect((tool.input_schema.properties as { files?: { type?: string } }).files?.type).toBe('array');
   });
 
   it('executor routes an in-catalog call through the host gated invoke()', async () => {
