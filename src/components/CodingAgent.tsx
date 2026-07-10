@@ -11,7 +11,7 @@
 // resolves the user's preferred provider/model (AGENT_AUTHORING_ARCHITECTURE §3; H2
 // favours chat() over net:fetch+secrets). Needs only the `llm:chat` capability.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCatalog, useMounts, getAppMountPath } from "@immediately-run/sdk";
+import { useCatalog, useMounts, getAppMountPath, describeChat } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
@@ -91,6 +91,9 @@ export default function CodingAgent() {
         execute: toolset.execute,
         system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot, today: todayIso() }),
         prompt,
+        // Token accounting + auto-compaction let the loop run past ~12 turns
+        // (R3-220): the resolved provider's window drives when to compact.
+        contextWindow: describeChat()?.features.maxContextTokens,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           onAssistantText: (text) => {
@@ -101,6 +104,8 @@ export default function CodingAgent() {
           onToolResult: (name, r) =>
             append({ kind: "result", name, content: r.content, isError: r.isError }),
           onNudge: () => append({ kind: "nudge" }),
+          onCompact: ({ summarizedCount }) =>
+            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
         },
       });
       await persist(transcript);
@@ -167,6 +172,11 @@ export default function CodingAgent() {
             {e.kind === "error" && <span className="ca-err">{e.text}</span>}
             {e.kind === "nudge" && (
               <span className="ca-nudge">↺ nudging the model to continue…</span>
+            )}
+            {e.kind === "compaction" && (
+              <span className="ca-compaction" title={e.summary}>
+                ⚑ compacted earlier turns to stay within the context window
+              </span>
             )}
           </li>
         ))}

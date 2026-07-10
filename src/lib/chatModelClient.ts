@@ -15,7 +15,7 @@ import {
   type ChatDelta,
   type ContentPart,
 } from '@immediately-run/sdk';
-import type { ChatMessage, ModelClient, TextBlock, ToolUseBlock } from './agentLoop';
+import type { ChatMessage, ModelClient, TextBlock, ToolUseBlock, TokenUsage } from './agentLoop';
 import type { AgentTool } from './agentTools';
 
 // The loop's Anthropic-shaped conversation → the SDK's tool-aware ChatRequest. The
@@ -62,6 +62,10 @@ export function createChatModelClient(): ModelClient {
       let text = '';
       const toolUses: ToolUseBlock[] = [];
       let stopReason = 'end_turn';
+      // Capture the provider `usage` delta (R3-220 token accounting) — the loop
+      // reads it to drive compaction/spend rather than discarding it. Absent when
+      // the provider reports none; the loop then falls back to a char/4 estimate.
+      let usage: TokenUsage | undefined;
       const gen = chat(chatReq);
       for (;;) {
         const step = await gen.next();
@@ -75,12 +79,14 @@ export function createChatModelClient(): ModelClient {
           req.onTextDelta?.(d.text);
         } else if (d.type === 'tool-call') {
           toolUses.push({ type: 'tool_use', id: d.id, name: d.name, input: (d.input ?? {}) as Record<string, unknown> });
+        } else if (d.type === 'usage') {
+          usage = { inputTokens: d.inputTokens, outputTokens: d.outputTokens };
         }
       }
       const content: (TextBlock | ToolUseBlock)[] = [];
       if (text) content.push({ type: 'text', text });
       content.push(...toolUses);
-      return { content, stopReason };
+      return { content, stopReason, ...(usage ? { usage } : {}) };
     },
   };
 }

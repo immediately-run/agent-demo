@@ -108,3 +108,11 @@
   font-style: italic;
   opacity: 0.85;
 }
+
+/* Context compaction (R3-220): a muted aside marking where the loop folded older
+   turns into a summary to stay within the context window. */
+.ca-compaction {
+  color: #7dd3fc;
+  font-style: italic;
+  opacity: 0.85;
+}
