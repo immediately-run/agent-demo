@@ -70,7 +70,17 @@ export default function AgentDemo() {
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       // `cancelled` is a normal outcome (user dismissed the overlay), not an error.
-      setPickNote(code === "cancelled" ? "cancelled" : code);
+      // `forbidden` is expected when this demo runs OUTSIDE the agents activity:
+      // `task:invoke` is elevated and conferred by the panel.agent binding, so the
+      // standalone/stage copy holds it only if the user pre-authorized it
+      // (Settings → Pre-authorize). Say so instead of leaving a bare code.
+      setPickNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "forbidden"
+            ? "forbidden — task:invoke is granted by the agents activity; standalone, pre-authorize this app with task:invoke under Settings → Pre-authorize"
+            : code,
+      );
     } finally {
       setPicking(false);
     }
@@ -100,7 +110,9 @@ export default function AgentDemo() {
           ? "cancelled"
           : code === "auth-required"
             ? "sign in to use a space"
-            : code,
+            : code === "forbidden"
+              ? "forbidden — task:invoke is granted by the agents activity; standalone, pre-authorize this app with task:invoke under Settings → Pre-authorize"
+              : code,
       );
     } finally {
       setEditing(false);
