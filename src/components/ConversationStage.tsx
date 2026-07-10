@@ -11,6 +11,7 @@ import {
   getAppMountPath,
   postToRegion,
   onRegionMessage,
+  describeChat,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
@@ -142,6 +143,8 @@ export default function ConversationStage() {
         system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot: stageTree?.root, today: todayIso() }),
         history,
         prompt: kickoff,
+        // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
+        contextWindow: describeChat()?.features.maxContextTokens,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           onAssistantText: (text) => {
@@ -151,6 +154,8 @@ export default function ConversationStage() {
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
           onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
           onNudge: () => append({ kind: "nudge" }),
+          onCompact: ({ summarizedCount }) =>
+            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
         },
       });
       if (conv && store) {
@@ -207,6 +212,11 @@ export default function ConversationStage() {
             {e.kind === "error" && <span className="ca-err">{e.text}</span>}
             {e.kind === "nudge" && (
               <span className="ca-nudge">↺ nudging the model to continue…</span>
+            )}
+            {e.kind === "compaction" && (
+              <span className="ca-compaction" title={e.summary}>
+                ⚑ compacted earlier turns to stay within the context window
+              </span>
             )}
           </li>
         ))}

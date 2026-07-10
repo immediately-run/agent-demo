@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { messagesToLog } from './transcript';
-import { NUDGE_TEXT, type ChatMessage } from './agentLoop';
+import { NUDGE_TEXT, COMPACTION_MARKER, type ChatMessage } from './agentLoop';
 
 describe('messagesToLog', () => {
   it('flattens turns and correlates tool results to their tool name', () => {
@@ -31,6 +31,20 @@ describe('messagesToLog', () => {
     expect(messagesToLog(messages)).toEqual([
       { kind: 'text', text: "I'll read the file." },
       { kind: 'nudge' },
+      { kind: 'text', text: 'Done.' },
+    ]);
+  });
+
+  it('(R3-220 exit-e) renders a replayed compaction summary as a compaction row', () => {
+    // A persisted conversation that was compacted mid-run: the summary is a `user`
+    // message prefixed with COMPACTION_MARKER. On replay it must read as a compaction
+    // affordance, not as a user turn.
+    const messages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: `${COMPACTION_MARKER}Goal: build. Progress: edited /src/App.tsx.` }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+    ];
+    expect(messagesToLog(messages)).toEqual([
+      { kind: 'compaction', summary: 'Goal: build. Progress: edited /src/App.tsx.' },
       { kind: 'text', text: 'Done.' },
     ]);
   });
