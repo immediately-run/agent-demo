@@ -303,3 +303,66 @@ describe('edit_file', () => {
     expect(res).toEqual({ content: 'not found', isError: true });
   });
 });
+
+describe('read_file offset/limit paging (R3-223)', () => {
+  // A 10-line file (no trailing newline) → deterministic line addressing.
+  const linesFs = () => new MemFs({ '/app/lines.txt': Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join('\n') });
+
+  it('read_file advertises offset/limit in its schema', () => {
+    const tool = ts(seed()).tools.find((t) => t.name === 'read_file')!;
+    const props = (tool.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(props).toHaveProperty('offset');
+    expect(props).toHaveProperty('limit');
+  });
+
+  it('offset+limit returns exactly the requested line window', async () => {
+    const { execute } = ts(linesFs());
+    const res = await execute('read_file', { path: 'lines.txt', offset: 3, limit: 2 });
+    expect(res.content.split('\n\n')[0]).toBe('L3\nL4'); // exactly lines 3–4
+    expect(res.content).toContain('continue with offset=5'); // names the next offset
+  });
+
+  it('a window that reaches EOF is marked end-of-file, not "continue"', async () => {
+    const { execute } = ts(linesFs());
+    const res = await execute('read_file', { path: 'lines.txt', offset: 9, limit: 5 });
+    expect(res.content.split('\n\n')[0]).toBe('L9\nL10');
+    expect(res.content).toContain('end of file');
+    expect(res.content).not.toContain('continue with offset');
+  });
+
+  it('offset past EOF returns an explicit empty notice', async () => {
+    const { execute } = ts(linesFs());
+    const res = await execute('read_file', { path: 'lines.txt', offset: 99 });
+    expect(res.content).toContain('past end of file');
+  });
+
+  it('omitting offset AND limit preserves verbatim behavior for a small file', async () => {
+    const { execute } = ts(seed());
+    // No annotation, byte-for-byte content (the fast path).
+    expect(await execute('read_file', { path: '/src/App.tsx' })).toEqual({
+      content: 'export default function App(){ return null }\nconst TODO = 1\n',
+    });
+  });
+
+  it('a >READ_CAP file is FULLY readable by paging offset until EOF', async () => {
+    // ~98 KB across 1000 lines (each ~97 bytes) — larger than the 64 KB window, so
+    // the old whole-file read truncated the tail irrecoverably.
+    const NLINES = 1000;
+    const original = Array.from({ length: NLINES }, (_, i) => `line ${i + 1} ` + 'x'.repeat(90)).join('\n');
+    const { execute } = ts(new MemFs({ '/app/big.txt': original }));
+
+    const collected: string[] = [];
+    let offset = 1;
+    let guard = 0;
+    for (;;) {
+      if (guard++ > 100) throw new Error('paging did not terminate');
+      const res = await execute('read_file', { path: 'big.txt', offset });
+      const body = res.content.replace(/\n\n\[[^\]]*\]$/, ''); // strip the trailing notice
+      collected.push(body);
+      const m = /continue with offset=(\d+)/.exec(res.content);
+      if (!m) break; // reached EOF
+      offset = Number(m[1]);
+    }
+    expect(collected.join('\n')).toBe(original); // every byte recovered
+  });
+});

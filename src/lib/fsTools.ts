@@ -198,12 +198,69 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     async read_file(input) {
       const abs = resolveWithin(root, String(input.path ?? ''));
       if (!abs) return notFound;
+      const offsetGiven = input.offset !== undefined && input.offset !== null;
+      const limitGiven = input.limit !== undefined && input.limit !== null;
       try {
         const text = await p.readFile(abs, 'utf8');
-        if (text.length > READ_CAP) {
-          return { content: `${text.slice(0, READ_CAP)}\n\n[truncated — file is ${text.length} bytes; read a smaller range or specific file]` };
+        // Fast path: a small whole file with no paging requested reads verbatim,
+        // exactly as before — the common case is untouched.
+        if (!offsetGiven && !limitGiven && text.length <= READ_CAP) {
+          return { content: text };
         }
-        return { content: text };
+        // Otherwise page by line: `offset` (1-indexed start line) + `limit` (line
+        // count), each optional. This makes a >READ_CAP file FULLY readable — the
+        // old code truncated at 64 KB with no way to see the tail. READ_CAP stays a
+        // per-window byte guard; when a window is cut short (by the cap or `limit`)
+        // the notice names the exact `offset=` to continue from (Pi's read-until-
+        // complete pattern), so the model can page through to EOF.
+        const lines = text.split('\n');
+        const totalLines = lines.length;
+        const start = Math.max(1, Math.trunc(Number(input.offset ?? 1)) || 1);
+        if (start > totalLines) {
+          return { content: `[empty — offset ${start} is past end of file (${totalLines} lines)]` };
+        }
+        const wantCount = limitGiven
+          ? Math.max(0, Math.trunc(Number(input.limit)) || 0)
+          : totalLines - (start - 1);
+
+        const windowLines: string[] = [];
+        let bytes = 0;
+        let emitted = 0;
+        let singleLineOverCap = false;
+        for (let i = start - 1; i < totalLines && emitted < wantCount; i++) {
+          const ln = lines[i];
+          const lnBytes = ln.length + 1; // + the joining newline
+          if (emitted > 0 && bytes + lnBytes > READ_CAP) break; // page boundary
+          if (emitted === 0 && ln.length > READ_CAP) {
+            // A single line larger than the whole window: emit it truncated (there
+            // is no finer unit than a line) and report it, rather than loop forever.
+            windowLines.push(ln.slice(0, READ_CAP));
+            emitted = 1;
+            singleLineOverCap = true;
+            break;
+          }
+          windowLines.push(ln);
+          bytes += lnBytes;
+          emitted++;
+        }
+
+        if (emitted === 0) {
+          return { content: `[empty window — offset ${start}, limit ${wantCount}]` };
+        }
+        const body = windowLines.join('\n');
+        const last = start + emitted - 1;
+        if (singleLineOverCap) {
+          return { content: `${body}\n\n[truncated — line ${start} is ${lines[start - 1].length} bytes and exceeds the ${READ_CAP}-byte window; it cannot be split further by line]` };
+        }
+        if (last < totalLines) {
+          return { content: `${body}\n\n[showing lines ${start}–${last} of ${totalLines}; continue with offset=${last + 1}]` };
+        }
+        // Reached EOF. Annotate only when the caller was paging (offset/limit given);
+        // a full small-file read stays un-annotated.
+        if (offsetGiven || limitGiven) {
+          return { content: `${body}\n\n[lines ${start}–${totalLines} of ${totalLines} — end of file]` };
+        }
+        return { content: body };
       } catch (e) {
         return fsError(e);
       }
@@ -362,7 +419,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const str = (description: string) => ({ type: 'string', description });
 
   const tools: Toolset['tools'] = [
-    { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
+    { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
     { name: 'write_file', description: 'Create or **overwrite** a whole workspace file (parent dirs are created). Use for NEW files or full rewrites. To change part of an EXISTING file, prefer `edit_file` — do not regenerate a large file just to add a few lines. Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
     { name: 'edit_file', description: 'Make a surgical edit to an existing file by replacing an exact snippet — the right tool for changing or adding a few lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' } }) },
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },
