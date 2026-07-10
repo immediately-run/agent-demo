@@ -70,7 +70,18 @@ export default function AgentDemo() {
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       // `cancelled` is a normal outcome (user dismissed the overlay), not an error.
-      setPickNote(code === "cancelled" ? "cancelled" : code);
+      // `forbidden` is expected when this demo runs OUTSIDE the agents activity:
+      // `task:invoke` is elevated and conferred by the panel.agent/stage bindings,
+      // and no consent path exists yet for a plain capability on a URL-loaded app
+      // (boot consent covers mounts+net:fetch; M1 pre-auth validates but does not
+      // mint plain caps — R3-233). Say so instead of leaving a bare code.
+      setPickNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "forbidden"
+            ? "forbidden — task:invoke is conferred by the agents-activity bindings; the standalone copy of this demo cannot acquire it (no consent path for plain capabilities yet)"
+            : code,
+      );
     } finally {
       setPicking(false);
     }
@@ -100,7 +111,9 @@ export default function AgentDemo() {
           ? "cancelled"
           : code === "auth-required"
             ? "sign in to use a space"
-            : code,
+            : code === "forbidden"
+              ? "forbidden — task:invoke is conferred by the agents-activity bindings; the standalone copy of this demo cannot acquire it (no consent path for plain capabilities yet)"
+              : code,
       );
     } finally {
       setEditing(false);
