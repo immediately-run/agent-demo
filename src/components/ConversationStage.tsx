@@ -16,7 +16,7 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
-import { SYSTEM_PROMPT } from "../lib/agentPrompt";
+import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
@@ -139,7 +139,7 @@ export default function ConversationStage() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot: stageTree?.root, today: todayIso() }),
         history,
         prompt: kickoff,
         events: {

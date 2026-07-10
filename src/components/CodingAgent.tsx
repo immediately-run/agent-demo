@@ -16,7 +16,7 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
-import { SYSTEM_PROMPT } from "../lib/agentPrompt";
+import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
@@ -70,6 +70,12 @@ export default function CodingAgent() {
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
   }, [catalog, mounts]);
 
+  // The workspace root the fs tools are chrooted to — env grounding for the prompt.
+  const workspaceRoot = useMemo(
+    () => resolveWorkingTreeMount(mounts, getAppMountPath()).root,
+    [mounts],
+  );
+
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
   const run = async () => {
@@ -83,7 +89,7 @@ export default function CodingAgent() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot, today: todayIso() }),
         prompt,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
