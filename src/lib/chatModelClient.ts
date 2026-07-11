@@ -58,6 +58,10 @@ export function createChatModelClient(): ModelClient {
         messages: toChatMessages(req.system, req.messages),
         ...(req.tools.length ? { tools: toChatTools(req.tools) } : {}),
         modelHint: 'smart',
+        // R3-224: hand the loop's abort signal to the SDK so the stop button aborts
+        // the in-flight upstream request (host stops generating + billing), not just
+        // the app-side iterator. `chat()` peels it off before the wire params.
+        ...(req.signal ? { signal: req.signal } : {}),
       };
       let text = '';
       const toolUses: ToolUseBlock[] = [];

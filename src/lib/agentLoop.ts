@@ -57,6 +57,9 @@ export interface ModelClient {
     tools: AgentTool[];
     /** Called with incremental assistant-text slices during a streamed turn. */
     onTextDelta?: (text: string) => void;
+    /** R3-224: aborts the in-flight turn — the host stops the upstream provider
+     *  request and stops billing, not just the app-side stream (§3.3). */
+    signal?: AbortSignal;
   }): Promise<ModelResponse>;
 }
 
@@ -132,6 +135,11 @@ export interface RunAgentOptions {
   tokenBudget?: number;
   /** Max consecutive truncated-tool-call re-prompts before giving up (default 2). */
   maxTruncationRetries?: number;
+  /** R3-224 (§3.3): the stop button. When it fires the loop stops between turns AND
+   *  aborts the in-flight model turn (the host tears down the upstream provider
+   *  request and stops billing) — not merely the between-turn loop. The transcript so
+   *  far is returned; an abort is a clean stop, never a thrown error. */
+  signal?: AbortSignal;
   events?: AgentEvents;
 }
 
@@ -304,7 +312,7 @@ const TRUNCATED_RETRY_TEXT =
  * accounts tokens and compacts automatically so it can run long.
  */
 export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
-  const { client, tools, execute, system, prompt, events } = opts;
+  const { client, tools, execute, system, prompt, events, signal } = opts;
   const maxTurns = opts.maxTurns ?? 100;
   const maxNudges = opts.maxNudges ?? 1;
   const maxTruncationRetries = opts.maxTruncationRetries ?? 2;
@@ -327,6 +335,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   let spentTokens = 0;
 
   for (let turn = 0; turn < maxTurns; turn++) {
+    // R3-224 (§3.3): the stop button, checked between turns. Combined with the
+    // per-request `signal` below (which aborts the in-flight upstream turn), this
+    // halts "the loop between tool calls AND aborts the in-flight LLM request".
+    if (signal?.aborted) break;
     // Compact BEFORE the next request when the running context is near the window.
     if (shouldCompact(contextTokens, window, reserveTokens)) {
       const { messages: compacted, summarizedCount } = await compactTranscript(
@@ -342,21 +354,28 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     }
 
     const sendTurn = () =>
-      client.createMessage({ system, messages, tools, onTextDelta: events?.onAssistantDelta });
+      client.createMessage({ system, messages, tools, onTextDelta: events?.onAssistantDelta, signal });
     let res: ModelResponse;
     try {
-      res = await sendTurn();
+      try {
+        res = await sendTurn();
+      } catch (e) {
+        // Recover-then-retry on a hard context-overflow (exit-c): compact once and
+        // re-send. If there is nothing to compact, or the retry also overflows, the
+        // error propagates — a bounded recovery, never a dead loop.
+        if (signal?.aborted || !isContextOverflow(e)) throw e;
+        const { messages: compacted, summarizedCount } = await compactTranscript(messages, client, keepRecentTurns);
+        if (summarizedCount === 0) throw e;
+        messages = compacted;
+        contextTokens = estimateTokens(messages);
+        events?.onCompact?.({ summarizedCount });
+        res = await sendTurn();
+      }
     } catch (e) {
-      // Recover-then-retry on a hard context-overflow (exit-c): compact once and
-      // re-send. If there is nothing to compact, or the retry also overflows, the
-      // error propagates to the caller — a bounded recovery, never a dead loop.
-      if (!isContextOverflow(e)) throw e;
-      const { messages: compacted, summarizedCount } = await compactTranscript(messages, client, keepRecentTurns);
-      if (summarizedCount === 0) throw e;
-      messages = compacted;
-      contextTokens = estimateTokens(messages);
-      events?.onCompact?.({ summarizedCount });
-      res = await sendTurn();
+      // R3-224: a mid-turn abort surfaces as a thrown (Abort/Stream)Error. Treat it
+      // as a CLEAN stop — return the transcript so far — not a failure to bubble up.
+      if (signal?.aborted) break;
+      throw e;
     }
 
     // Token accounting (R3-220): prefer the provider `usage`, else estimate. `turnCost`
