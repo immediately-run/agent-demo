@@ -31,6 +31,9 @@ export default function ConversationStage() {
   const mounts = useMounts();
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
+  // R3-224 (§3.3): the stop button's abort controller for the in-flight run. Aborting
+  // it halts the loop AND tears down the in-flight upstream LLM request (stops billing).
+  const abortRef = useRef<AbortController | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState("");
@@ -135,6 +138,8 @@ export default function ConversationStage() {
     setRunning(true);
     setStreaming("");
     append({ kind: "user", text: kickoff });
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
@@ -143,6 +148,8 @@ export default function ConversationStage() {
         system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot: stageTree?.root, today: todayIso() }),
         history,
         prompt: kickoff,
+        // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
+        signal: controller.signal,
         // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
@@ -173,8 +180,15 @@ export default function ConversationStage() {
     } finally {
       setStreaming("");
       setRunning(false);
+      abortRef.current = null;
     }
   };
+
+  // R3-224 (§3.3): stop the in-flight run — aborts the loop between tool calls AND the
+  // in-flight LLM request (the host tears down the upstream provider fetch, stops billing).
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   return (
     <div className="ca">
@@ -241,11 +255,19 @@ export default function ConversationStage() {
         <button
           type="button"
           className="ca-run"
-          disabled={running || !stageTree}
-          title={!stageTree ? "Waiting for the app's workspace to connect" : undefined}
-          onClick={() => void run()}
+          // While running, the button becomes a live Stop control (R3-224): it must
+          // stay enabled so the user can abort the in-flight turn and stop billing.
+          disabled={running ? false : !stageTree}
+          title={
+            running
+              ? "Stop the agent and abort the in-flight request"
+              : !stageTree
+                ? "Waiting for the app's workspace to connect"
+                : undefined
+          }
+          onClick={() => (running ? stop() : void run())}
         >
-          {running ? "Running…" : "Run"}
+          {running ? "Stop" : "Run"}
         </button>
       </div>
     </div>

@@ -30,7 +30,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.28.0",
+    "@immediately-run/sdk": "^0.32.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

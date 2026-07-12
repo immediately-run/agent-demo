@@ -37,6 +37,8 @@ export default function CodingAgent() {
   // failure degrades to today's ephemeral behavior rather than crashing.
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
+  // R3-224 (§3.3): the stop button's abort controller for the in-flight run.
+  const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -84,6 +86,8 @@ export default function CodingAgent() {
     setLog([]);
     setStreaming("");
     append({ kind: "user", text: prompt });
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
@@ -91,6 +95,8 @@ export default function CodingAgent() {
         execute: toolset.execute,
         system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot, today: todayIso() }),
         prompt,
+        // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
+        signal: controller.signal,
         // Token accounting + auto-compaction let the loop run past ~12 turns
         // (R3-220): the resolved provider's window drives when to compact.
         contextWindow: describeChat()?.features.maxContextTokens,
@@ -114,8 +120,12 @@ export default function CodingAgent() {
     } finally {
       setStreaming("");
       setRunning(false);
+      abortRef.current = null;
     }
   };
+
+  // R3-224 (§3.3): abort the in-flight run — the loop AND the upstream LLM request.
+  const stop = () => abortRef.current?.abort();
 
   // Save the run into its conversation (best-effort; no-op without a store).
   const persist = async (messages: Conversation["messages"]) => {
@@ -148,8 +158,13 @@ export default function CodingAgent() {
           }}
           aria-label="Prompt"
         />
-        <button type="button" className="ca-run" disabled={running} onClick={() => void run()}>
-          {running ? "Running…" : "Run"}
+        <button
+          type="button"
+          className="ca-run"
+          // While running, this is a live Stop control (R3-224) — abort the in-flight turn.
+          onClick={() => (running ? stop() : void run())}
+        >
+          {running ? "Stop" : "Run"}
         </button>
       </div>
 

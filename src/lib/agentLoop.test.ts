@@ -465,3 +465,71 @@ describe('runAgent — the agentic tool-use loop (§3.3)', () => {
     });
   });
 });
+
+describe('runAgent — mid-stream abort / stop button (R3-224 §3.3)', () => {
+  it('threads the abort signal into every model turn', async () => {
+    let seenSignal: AbortSignal | undefined;
+    const client: ModelClient = {
+      async createMessage(req) {
+        seenSignal = req.signal;
+        return { stopReason: 'end_turn', content: [{ type: 'text', text: 'ok' }] };
+      },
+    };
+    const ctrl = new AbortController();
+    await runAgent({
+      client,
+      tools: TOOLS,
+      execute: async () => ({ content: 'r' }),
+      prompt: 'go',
+      signal: ctrl.signal,
+    });
+    expect(seenSignal).toBe(ctrl.signal);
+  });
+
+  it('stops between turns — no further model call — once the signal is aborted', async () => {
+    const client = scriptedClient([
+      { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'spaces__share', input: {} }] },
+      { stopReason: 'end_turn', content: [{ type: 'text', text: 'should never run' }] },
+    ]);
+    const ctrl = new AbortController();
+    // The first tool execution fires the stop button; the loop's next-turn check halts it.
+    const execute = vi.fn(async () => {
+      ctrl.abort();
+      return { content: 'r' };
+    });
+    await runAgent({ client, tools: TOOLS, execute, prompt: 'go', signal: ctrl.signal });
+    expect(client.calls).toBe(1); // the 2nd model turn was never requested
+  });
+
+  it('treats a mid-turn abort (thrown by the client) as a CLEAN stop, not an error', async () => {
+    const ctrl = new AbortController();
+    const client: ModelClient = {
+      async createMessage() {
+        ctrl.abort(); // the host aborted the in-flight upstream request
+        const e = Object.assign(new Error('stream aborted'), { code: 'aborted' });
+        throw e;
+      },
+    };
+    // Must resolve (return the transcript so far), never reject.
+    const transcript = await runAgent({
+      client,
+      tools: TOOLS,
+      execute: async () => ({ content: 'r' }),
+      prompt: 'go',
+      signal: ctrl.signal,
+    });
+    expect(transcript).toEqual([{ role: 'user', content: [{ type: 'text', text: 'go' }] }]);
+  });
+
+  it('re-throws a non-abort error (abort handling does not swallow real failures)', async () => {
+    const client: ModelClient = {
+      async createMessage() {
+        throw new Error('genuine provider failure');
+      },
+    };
+    const ctrl = new AbortController(); // never aborted
+    await expect(
+      runAgent({ client, tools: TOOLS, execute: async () => ({ content: 'r' }), prompt: 'go', signal: ctrl.signal }),
+    ).rejects.toThrow(/genuine provider failure/);
+  });
+});
