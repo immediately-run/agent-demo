@@ -26,6 +26,16 @@ import { messagesToLog, type LogEntry } from "../lib/transcript";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import "./CodingAgent.css";
 
+/** Turn a store failure into something a user can act on. `auth-required` is the
+ *  ordinary signed-out case; everything else names the code so a bad capability
+ *  grant or a failing settings mount is diagnosable from the UI alone. */
+function describeStoreFailure(e: unknown): string {
+  const code = (e as { code?: string })?.code;
+  if (code === "auth-required") return "Sign in to keep your conversations (and their history).";
+  const detail = code ?? (e as Error)?.message ?? String(e);
+  return `Conversations can't be saved (${detail}), so each message is sent without the earlier ones.`;
+}
+
 export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
@@ -39,6 +49,12 @@ export default function ConversationStage() {
   const [streaming, setStreaming] = useState("");
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
+  // Why persistence is unavailable, if it is. The conversation store is not a
+  // nice-to-have: `run()` reads the model's HISTORY out of the persisted
+  // conversation, so a dead store silently downgrades the agent to a stateless
+  // chatbot that re-reads nothing between turns. That failure used to be
+  // swallowed by empty `catch {}`s — surface it instead (R3-247).
+  const [storeError, setStoreError] = useState<string | null>(null);
 
   // The STAGE app's working tree, conferred by the host as a `type:'worktree'` mount
   // (AA-23) — NOT the agent's OWN repo. If it isn't conferred (the mount hasn't arrived,
@@ -86,12 +102,15 @@ export default function ConversationStage() {
         const store = await openConversationStore();
         if (!live) return;
         storeRef.current = store;
+        setStoreError(null);
         if (!convRef.current) {
           const [newest] = await store.list();
           if (newest && live) await loadConversation(newest.id);
         }
-      } catch {
-        /* no host / signed out — render empty */
+      } catch (e) {
+        // Signed out is the ordinary case; anything else is a real fault the user
+        // must see, because it costs them conversation memory.
+        if (live) setStoreError(describeStoreFailure(e));
       }
     })();
     return () => {
@@ -128,10 +147,16 @@ export default function ConversationStage() {
         conv = await store.create();
         convRef.current = conv;
         setTitle(conv.title);
-      } catch {
-        /* fall through — run ephemerally if create fails */
+        setStoreError(null);
+      } catch (e) {
+        // Running ephemerally is a real degradation, not a detail: `history`
+        // below falls back to [], so the model sees ONLY this prompt and the
+        // conversation appears to have no memory. Say so (R3-247).
+        setStoreError(describeStoreFailure(e));
       }
     }
+    // The model's memory of earlier turns. Empty whenever the store is
+    // unavailable — which is exactly why `storeError` is surfaced above.
     const history = conv?.messages ?? [];
     const kickoff = prompt;
     setPrompt("");
@@ -170,9 +195,13 @@ export default function ConversationStage() {
         try {
           convRef.current = await store.save({ ...conv, title: newTitle, messages: transcript });
           setTitle(newTitle);
+          setStoreError(null);
           void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
-        } catch {
-          /* persistence best-effort */
+        } catch (e) {
+          // A failed save means `convRef.current` keeps the PRE-run messages, so the
+          // next turn re-sends a stale (or empty) history — the same amnesia as a
+          // dead store, one turn later. Never silent (R3-247).
+          setStoreError(describeStoreFailure(e));
         }
       }
     } catch (e) {
@@ -205,6 +234,12 @@ export default function ConversationStage() {
             Waiting for the app's workspace to connect… file tools are unavailable until then
             (I won't edit my own files).
           </span>
+        </div>
+      )}
+
+      {storeError && (
+        <div className="ca-line ca-error" role="status">
+          <span className="ca-err">{storeError}</span>
         </div>
       )}
 

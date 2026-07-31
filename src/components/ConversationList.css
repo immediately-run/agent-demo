@@ -30,6 +30,12 @@
   font-size: 13px;
   opacity: 0.6;
 }
+/* A store failure is not the empty state — it costs the user conversation
+   history, so it reads as an error rather than a muted hint. */
+.cl-error {
+  color: #f87171;
+  opacity: 1;
+}
 .cl-list {
   list-style: none;
   margin: 0;
