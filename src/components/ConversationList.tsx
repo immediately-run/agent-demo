@@ -20,11 +20,24 @@ function relTime(ms: number): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
+/** Shared with the stage: name the reason so a bad grant or a failing settings
+ *  mount is diagnosable from the UI alone. */
+function describeStoreFailure(e: unknown): string {
+  const code = (e as { code?: string })?.code;
+  if (code === "auth-required") return "Sign in to keep your conversations.";
+  const detail = code ?? (e as Error)?.message ?? String(e);
+  return `Conversations can't be saved (${detail}).`;
+}
+
 export default function ConversationList() {
   const storeRef = useRef<ConversationStore | null>(null);
   const [items, setItems] = useState<ConversationMeta[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  // Why the store is unavailable, if it is. Without it "New conversation" is a
+  // silent no-op and the list is permanently empty — never leave that unexplained
+  // (R3-247).
+  const [storeError, setStoreError] = useState<string | null>(null);
 
   const select = useCallback((id: string) => {
     setSelected(id);
@@ -52,9 +65,10 @@ export default function ConversationList() {
         const list = await store.list();
         if (!live) return;
         setItems(list);
+        setStoreError(null);
         if (list[0]) select(list[0].id);
-      } catch {
-        /* no host / signed out — render the empty state */
+      } catch (e) {
+        if (live) setStoreError(describeStoreFailure(e));
       } finally {
         if (live) setReady(true);
       }
@@ -80,13 +94,18 @@ export default function ConversationList() {
 
   const newConversation = async () => {
     const store = storeRef.current;
-    if (!store) return;
+    // No store ⇒ the button cannot work. Say why rather than doing nothing.
+    if (!store) {
+      setStoreError((prev) => prev ?? describeStoreFailure(new Error("settings unavailable")));
+      return;
+    }
     try {
       const conv = await store.create();
       setItems((l) => [{ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt }, ...l]);
+      setStoreError(null);
       select(conv.id);
-    } catch {
-      /* ignore — create can fail signed out */
+    } catch (e) {
+      setStoreError(describeStoreFailure(e));
     }
   };
 
@@ -115,7 +134,13 @@ export default function ConversationList() {
         </button>
       </header>
 
-      {ready && items.length === 0 && (
+      {storeError && (
+        <p className="cl-empty cl-error" role="status">
+          {storeError}
+        </p>
+      )}
+
+      {ready && !storeError && items.length === 0 && (
         <p className="cl-empty">No conversations yet. Start one with “New conversation”.</p>
       )}
 
