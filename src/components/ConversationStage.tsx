@@ -24,17 +24,8 @@ import { openConversationStore, deriveTitle, type ConversationStore } from "../l
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
+import { describeStoreFailure as describe } from "../lib/storeError";
 import "./CodingAgent.css";
-
-/** Turn a store failure into something a user can act on. `auth-required` is the
- *  ordinary signed-out case; everything else names the code so a bad capability
- *  grant or a failing settings mount is diagnosable from the UI alone. */
-function describeStoreFailure(e: unknown): string {
-  const code = (e as { code?: string })?.code;
-  if (code === "auth-required") return "Sign in to keep your conversations (and their history).";
-  const detail = code ?? (e as Error)?.message ?? String(e);
-  return `Conversations can't be saved (${detail}), so each message is sent without the earlier ones.`;
-}
 
 export default function ConversationStage() {
   const catalog = useCatalog();
@@ -110,7 +101,7 @@ export default function ConversationStage() {
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
         // must see, because it costs them conversation memory.
-        if (live) setStoreError(describeStoreFailure(e));
+        if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones"));
       }
     })();
     return () => {
@@ -152,7 +143,7 @@ export default function ConversationStage() {
         // Running ephemerally is a real degradation, not a detail: `history`
         // below falls back to [], so the model sees ONLY this prompt and the
         // conversation appears to have no memory. Say so (R3-247).
-        setStoreError(describeStoreFailure(e));
+        setStoreError(describe(e, ", so each message is sent without the earlier ones"));
       }
     }
     // The model's memory of earlier turns. Empty whenever the store is
@@ -201,7 +192,7 @@ export default function ConversationStage() {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
           // dead store, one turn later. Never silent (R3-247).
-          setStoreError(describeStoreFailure(e));
+          setStoreError(describe(e, ", so each message is sent without the earlier ones"));
         }
       }
     } catch (e) {

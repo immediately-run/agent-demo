@@ -8,6 +8,7 @@ import { postToRegion, onRegionMessage } from "@immediately-run/sdk";
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { STAGE_REGION, isUpdated } from "../lib/conversationIpc";
+import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
 
 function relTime(ms: number): string {
@@ -18,15 +19,6 @@ function relTime(ms: number): string {
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
-}
-
-/** Shared with the stage: name the reason so a bad grant or a failing settings
- *  mount is diagnosable from the UI alone. */
-function describeStoreFailure(e: unknown): string {
-  const code = (e as { code?: string })?.code;
-  if (code === "auth-required") return "Sign in to keep your conversations.";
-  const detail = code ?? (e as Error)?.message ?? String(e);
-  return `Conversations can't be saved (${detail}).`;
 }
 
 export default function ConversationList() {
