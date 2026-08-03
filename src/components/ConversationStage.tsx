@@ -116,6 +116,22 @@ export default function ConversationStage() {
     });
   }, [loadConversation]);
 
+  // Ask the panel what it has selected, once, on mount (R3-243).
+  //
+  // A `select-conversation` can be sent while this region does not exist: on mobile
+  // the panel and the stage are different COLUMNS, and an unvisited column renders a
+  // skeleton with no iframe — so the tap that reveals this pane is also the tap whose
+  // selection had nowhere to land. Without this handshake the fallback above would
+  // win and show the newest conversation instead of the tapped one.
+  //
+  // Subscribed BEFORE the ask (the listener above is already installed by the time
+  // this effect runs), so the reply cannot arrive before anyone is listening. If the
+  // panel is not there — a stage mounted on its own — nothing answers and the
+  // newest-conversation fallback stands, exactly as before.
+  useEffect(() => {
+    void postToRegion(PANEL_REGION, { type: "request-selection" }).catch(() => {});
+  }, []);
+
   const run = async () => {
     if (!prompt.trim() || running) return;
     // Refuse rather than author the wrong tree: with no conferred stage-app working

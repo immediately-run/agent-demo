@@ -30,7 +30,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.36.0",
+    "@immediately-run/sdk": "^0.37.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
@@ -50,5 +50,5 @@
     "vite": "^8.0.9",
     "vitest": "^4.1.8"
   },
-  "description": "Embedded-agent demo — a tool-runner confined to its grant-filtered method catalog (§5.5/§5.9)."
+  "description": "Embedded-agent demo \u2014 a tool-runner confined to its grant-filtered method catalog (\u00a75.5/\u00a75.9)."
 }
