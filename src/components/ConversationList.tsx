@@ -4,10 +4,10 @@
 // the stage over IPC. It runs no agent and holds no net:fetch — all model calls
 // happen in the stage (ConversationStage).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { postToRegion, onRegionMessage } from "@immediately-run/sdk";
+import { postToRegion, onRegionMessage, revealRegion } from "@immediately-run/sdk";
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
-import { STAGE_REGION, isUpdated } from "../lib/conversationIpc";
+import { STAGE_REGION, isUpdated, isRequestSelection } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
 
@@ -35,6 +35,30 @@ export default function ConversationList() {
     setSelected(id);
     void postToRegion(STAGE_REGION, { type: "select-conversation", id }).catch(() => {});
   }, []);
+  // The current selection, readable from the IPC listener without re-subscribing it
+  // on every change (the stage asks for it when it mounts). Mirrored in an effect,
+  // not during render — the listener only ever reads it asynchronously.
+  const selectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  // OPEN = select AND take the user there (R3-243). Distinct from `select` on
+  // purpose: only a tap that MEANS "show me this" advances the column. Selecting
+  // the first conversation on load, or the next one after a delete, is bookkeeping
+  // — advancing there would move the user somewhere they didn't ask to go, and the
+  // host would refuse it anyway (no gesture).
+  //
+  // The host ignores a reveal it doesn't like, so this needs no success handling;
+  // it only swallows the authorization rejection (an older host has no `reveal`
+  // method, which must degrade to today's behaviour rather than an unhandled reject).
+  const openConversation = useCallback(
+    (id: string) => {
+      select(id);
+      void revealRegion(STAGE_REGION).catch(() => {});
+    },
+    [select],
+  );
 
   const refresh = useCallback(async () => {
     const store = storeRef.current;
@@ -75,6 +99,17 @@ export default function ConversationList() {
   useEffect(() => {
     const off = onRegionMessage((m) => {
       if (isUpdated(m.data)) void refresh();
+      // The stage mounted and wants to know what it should be showing (R3-243). It
+      // may have missed the `select-conversation` entirely: on mobile it does not
+      // exist until the reveal puts it on screen, which happens after the post.
+      // Answering here is what makes tapping an OLDER conversation land on that one
+      // rather than on the newest.
+      else if (isRequestSelection(m.data) && selectedRef.current) {
+        void postToRegion(STAGE_REGION, {
+          type: "select-conversation",
+          id: selectedRef.current,
+        }).catch(() => {});
+      }
     });
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
@@ -95,7 +130,7 @@ export default function ConversationList() {
       const conv = await store.create();
       setItems((l) => [{ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt }, ...l]);
       setStoreError(null);
-      select(conv.id);
+      openConversation(conv.id);
     } catch (e) {
       setStoreError(describeStoreFailure(e));
     }
@@ -141,14 +176,14 @@ export default function ConversationList() {
           <li
             key={c.id}
             className={`cl-row${selected === c.id ? " cl-row-active" : ""}`}
-            onClick={() => select(c.id)}
+            onClick={() => openConversation(c.id)}
             tabIndex={0}
             role="button"
             aria-pressed={selected === c.id}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                select(c.id);
+                openConversation(c.id);
               }
             }}
           >
