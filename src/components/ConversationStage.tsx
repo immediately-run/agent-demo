@@ -257,6 +257,10 @@ export default function ConversationStage() {
       );
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
+      // Carry the MESSAGE too. A bare code sent this drill chasing the wrong layer
+      // once already (`invalid-argument` is a Firestore code, not a delegation one),
+      // and the message is what says which write failed.
+      const detail = (e as { message?: string })?.message ?? "";
       // `consent-required` is the NEGATIVE LEG, not a failure: it is exactly what must
       // happen when this app holds no net:fetch covering the callee's declared host —
       // nothing minted, no overlay opened.
@@ -265,7 +269,7 @@ export default function ConversationStage() {
           ? "cancelled"
           : code === "consent-required"
             ? "consent-required — negative leg: no covering net:fetch on this side, so nothing was minted and no overlay opened"
-            : code,
+            : `${code}${detail ? ` — ${detail}` : ""}`,
       );
     } finally {
       setProbing(false);
