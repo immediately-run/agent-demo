@@ -87,6 +87,54 @@ export default function AgentDemo() {
     }
   };
 
+  // --- M2 attenuated delegation (§8.15): hand a callee a CAPABILITY, narrowed ----
+  // The R3-43 drill-2 fixture. `probe` is provided by an app that declares a REQUIRED
+  // `net:fetch` host; the host mints it the INTERSECTION of that and what this app
+  // holds, never the union. The callee then spends it and reports what it could and
+  // could not reach — so a grant that was minted but not honoured, or honoured but not
+  // attenuated, is distinguishable from a correct one.
+  const [probing, setProbing] = useState(false);
+  const [probeNote, setProbeNote] = useState<string | null>(null);
+
+  const runProbe = async () => {
+    setProbing(true);
+    setProbeNote(null);
+    try {
+      const res = await invokeTask<{
+        probed: boolean;
+        declaredHostOk: boolean;
+        declaredDetail: string;
+        undeclaredHostOk: boolean;
+        undeclaredDetail: string;
+      }>("probe", { label: "R3-43 drill 2" });
+      // Report the PASS condition explicitly rather than dumping the payload: the
+      // delegated host must be reachable AND the undeclared one must not be. Naming
+      // which half failed is the difference between a drill and a shrug.
+      const ok = res?.declaredHostOk && !res?.undeclaredHostOk;
+      setProbeNote(
+        ok
+          ? `delegated + attenuated ✓ (declared ${res.declaredDetail}, undeclared ${res.undeclaredDetail})`
+          : `UNEXPECTED — declared ${res?.declaredHostOk ? "reachable" : "blocked"} (${res?.declaredDetail}), ` +
+            `undeclared ${res?.undeclaredHostOk ? "REACHABLE — not attenuated" : "blocked"} (${res?.undeclaredDetail})`,
+      );
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      // `consent-required` is the NEGATIVE leg of the drill, not a failure: it is what
+      // must happen when this app holds no net:fetch covering the callee's host.
+      setProbeNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "consent-required"
+            ? "consent-required — the negative leg: this app holds no net:fetch covering the callee's declared host, so nothing was minted and no overlay opened"
+            : code === "forbidden"
+              ? "forbidden — task:invoke is conferred by the agents-activity bindings"
+              : code,
+      );
+    } finally {
+      setProbing(false);
+    }
+  };
+
   // --- file delegation (§5.7/§8.7): hand a callee a file from MY OWN space -------
   const [editing, setEditing] = useState(false);
   const [editNote, setEditNote] = useState<string | null>(null);
@@ -241,6 +289,25 @@ export default function AgentDemo() {
         {pickNote && (
           <p className="ad-escape-sub">
             invokeTask → <span className="ad-err">{pickNote}</span>
+          </p>
+        )}
+      </div>
+
+      <div className="ad-escape">
+        <p className="ad-escape-h">Delegate a capability, attenuated (§8.15 / M2)</p>
+        <p className="ad-escape-sub">
+          Invoke an app that <em>requires</em> a <code>net:fetch</code> host. The host
+          mints it the intersection with what this app holds — never the union — and the
+          callee spends it, reporting what it could and could not reach. It also probes a
+          host it never declared: <em>blocked</em> there is the proof the grant was
+          attenuated rather than inherited.
+        </p>
+        <button type="button" className="ad-run" disabled={probing} onClick={runProbe}>
+          {probing ? "Probing…" : "Run the delegation probe"}
+        </button>
+        {probeNote && (
+          <p className="ad-escape-sub">
+            invokeTask → <span className="ad-err">{probeNote}</span>
           </p>
         )}
       </div>
