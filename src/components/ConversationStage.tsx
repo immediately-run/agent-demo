@@ -245,7 +245,7 @@ export default function ConversationStage() {
         declaredDetail: string;
         undeclaredHostOk: boolean;
         undeclaredDetail: string;
-      }>("probe", { label: "R3-43 drill 2" });
+      }>("m2-probe", { label: "R3-43 drill 2" });
       // Report the PASS CONDITION, not the payload: the delegated host must be
       // reachable AND the undeclared one must not be. Naming which half failed is the
       // difference between a drill and a shrug.

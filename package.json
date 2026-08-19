@@ -15,7 +15,7 @@
         "version": "^1"
       },
       {
-        "task": "probe",
+        "task": "m2-probe",
         "version": "^1"
       }
     ],
