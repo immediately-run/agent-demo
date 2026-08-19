@@ -12,6 +12,7 @@ import {
   postToRegion,
   onRegionMessage,
   describeChat,
+  invokeTask,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
@@ -226,6 +227,55 @@ export default function ConversationStage() {
     abortRef.current?.abort();
   }, []);
 
+  // --- R3-43 drill 2: M2 attenuated delegation, live -----------------------------
+  // The trigger lives HERE, not in the standalone AgentDemo, because `task:invoke` is
+  // conferred by this region's binding — the standalone copy cannot acquire it at all
+  // (no consent path for a plain capability yet, R3-233), so a button there could only
+  // ever report `forbidden` and would prove nothing about delegation.
+  const [probing, setProbing] = useState(false);
+  const [probeNote, setProbeNote] = useState<string | null>(null);
+
+  const runProbe = useCallback(async () => {
+    setProbing(true);
+    setProbeNote(null);
+    try {
+      const res = await invokeTask<{
+        probed: boolean;
+        declaredHostOk: boolean;
+        declaredDetail: string;
+        undeclaredHostOk: boolean;
+        undeclaredDetail: string;
+      }>("m2-probe", { label: "R3-43 drill 2" });
+      // Report the PASS CONDITION, not the payload: the delegated host must be
+      // reachable AND the undeclared one must not be. Naming which half failed is the
+      // difference between a drill and a shrug.
+      const ok = res?.declaredHostOk && !res?.undeclaredHostOk;
+      setProbeNote(
+        ok
+          ? `delegated + attenuated OK — declared ${res.declaredDetail}, undeclared ${res.undeclaredDetail}`
+          : `UNEXPECTED — declared ${res?.declaredHostOk ? "reachable" : "blocked"} (${res?.declaredDetail}), undeclared ${res?.undeclaredHostOk ? "REACHABLE, not attenuated" : "blocked"} (${res?.undeclaredDetail})`,
+      );
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      // Carry the MESSAGE too. A bare code sent this drill chasing the wrong layer
+      // once already (`invalid-argument` is a Firestore code, not a delegation one),
+      // and the message is what says which write failed.
+      const detail = (e as { message?: string })?.message ?? "";
+      // `consent-required` is the NEGATIVE LEG, not a failure: it is exactly what must
+      // happen when this app holds no net:fetch covering the callee's declared host —
+      // nothing minted, no overlay opened.
+      setProbeNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "consent-required"
+            ? "consent-required — negative leg: no covering net:fetch on this side, so nothing was minted and no overlay opened"
+            : `${code}${detail ? ` — ${detail}` : ""}`,
+      );
+    } finally {
+      setProbing(false);
+    }
+  }, []);
+
   return (
     <div className="ca">
       <header className="ca-hd">
@@ -234,6 +284,13 @@ export default function ConversationStage() {
           {toolset.tools.length} tools {stageTree ? "(catalog + files)" : "(catalog only)"}
         </span>
       </header>
+
+      <div className="ca-line" role="group">
+        <button type="button" onClick={runProbe} disabled={probing}>
+          {probing ? "Probing…" : "M2: run the delegation probe"}
+        </button>
+        {probeNote && <span className="ca-err"> {probeNote}</span>}
+      </div>
 
       {!stageTree && (
         <div className="ca-line ca-error" role="status">

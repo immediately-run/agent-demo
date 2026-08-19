@@ -13,13 +13,22 @@
       {
         "task": "edit-file",
         "version": "^1"
+      },
+      {
+        "task": "m2-probe",
+        "version": "^1"
       }
     ],
     "requests": {
       "llm:chat": {},
       "authoring:run": {},
       "diagnostics:read": {},
-      "task:invoke": {}
+      "task:invoke": {},
+      "net:fetch": {
+        "hosts": [
+          "https://example.com"
+        ]
+      }
     }
   },
   "scripts": {
