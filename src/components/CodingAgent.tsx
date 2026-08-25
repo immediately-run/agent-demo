@@ -17,6 +17,7 @@ import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
+import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
@@ -64,12 +65,14 @@ export default function CodingAgent() {
   // tree. When a stage app's tree is conferred (`type:'worktree'`, AA-23) author THAT;
   // otherwise (standalone agent) fall back to this app's own repo. Re-derived when the
   // conferred mount or its writability changes.
-  const toolset = useMemo(() => {
+  // `withSkills` runs LAST (R3-331): which host skills are offered depends on which
+  // tools this run actually got, so selection needs the merged list.
+  const { toolset, skills } = useMemo(() => {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
+    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools));
   }, [catalog, mounts]);
 
   // The workspace root the fs tools are chrooted to — env grounding for the prompt.
@@ -93,7 +96,7 @@ export default function CodingAgent() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot, today: todayIso() }),
+        system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot, today: todayIso() }),
         prompt,
         // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
         signal: controller.signal,
