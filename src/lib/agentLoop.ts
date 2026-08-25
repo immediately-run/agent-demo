@@ -19,9 +19,27 @@
 import type { AgentTool } from './agentTools';
 
 export type TextBlock = { type: 'text'; text: string };
+/**
+ * A block of the model's own reasoning (R3-335).
+ *
+ * Kept in the message sequence rather than rendered and thrown away, for two reasons:
+ * the user needs to see what the model is doing during the long stretches compaction
+ * now makes possible, and some providers REQUIRE the block echoed back — with its
+ * `signature` — for the following turn of a tool-use chain to stay valid. A loop that
+ * drops them is quietly lossy in a way that shows up as degraded output, not an error.
+ *
+ * `redactedData` carries provider-redacted reasoning: opaque bytes with no readable
+ * text, which still have to be replayed in place. Never render it.
+ */
+export type ReasoningBlock = {
+  type: 'reasoning';
+  text: string;
+  signature?: string;
+  redactedData?: string;
+};
 export type ToolUseBlock = { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> };
 export type ToolResultBlock = { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
 
 export type Role = 'user' | 'assistant';
 export interface ChatMessage {
@@ -39,7 +57,7 @@ export interface TokenUsage {
 
 /** One model turn: the assistant's emitted blocks + why it stopped (+ usage). */
 export interface ModelResponse {
-  content: (TextBlock | ToolUseBlock)[];
+  content: (TextBlock | ToolUseBlock | ReasoningBlock)[];
   /** Anthropic stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal' | … */
   stopReason: string;
   /** Provider token counts for this turn, when reported (R3-220 accounting). */
@@ -57,6 +75,9 @@ export interface ModelClient {
     tools: AgentTool[];
     /** Called with incremental assistant-text slices during a streamed turn. */
     onTextDelta?: (text: string) => void;
+    /** R3-335: incremental REASONING slices, for a live thinking surface. Never called
+     *  by a provider that does not emit reasoning. */
+    onReasoningDelta?: (text: string) => void;
     /** R3-224: aborts the in-flight turn — the host stops the upstream provider
      *  request and stops billing, not just the app-side stream (§3.3). */
     signal?: AbortSignal;
@@ -97,6 +118,10 @@ export interface AgentEvents {
   /** Fired when a turn was truncated (`max_tokens`) while emitting tool calls, so
    *  the partial calls were failed-and-re-prompted rather than executed (R3-220 F3). */
   onTruncatedToolCall?(): void;
+  /** R3-335: a streamed slice of the model's reasoning, for a live thinking surface. */
+  onReasoningDelta?(text: string): void;
+  /** R3-335: the complete reasoning block for a turn, once the turn is in. */
+  onReasoning?(block: ReasoningBlock): void;
 }
 
 export interface RunAgentOptions {
@@ -200,6 +225,9 @@ export function estimateTokens(messages: ChatMessage[]): number {
       if (b.type === 'text') chars += b.text.length;
       else if (b.type === 'tool_use') chars += JSON.stringify(b.input).length + b.name.length;
       else if (b.type === 'tool_result') chars += b.content.length;
+      // R3-335: reasoning occupies the window like anything else. Not counting it would
+      // let a thinking model overrun the context the accounting exists to protect.
+      else if (b.type === 'reasoning') chars += b.text.length + (b.redactedData?.length ?? 0);
     }
   }
   return Math.ceil(chars / 4);
@@ -257,7 +285,15 @@ export async function compactTranscript(
   if (tailStart <= 0) return { messages, summarizedCount: 0 };
 
   const head = messages.slice(0, tailStart);
-  const tail = messages.slice(tailStart);
+  // R3-335 — compaction DROPS reasoning from the kept tail, deliberately.
+  //
+  // A reasoning block is only ever required by the turn that FOLLOWS it, and compaction
+  // rewrites the transcript at a turn boundary: nothing after the boundary is mid-chain,
+  // so nothing needs the block replayed. Keeping them instead would spend the window on
+  // the most disposable content in it — the thing compaction exists to make room for.
+  // Doing it by an explicit rule, and saying so here, is the point: an implicit answer
+  // is what corrupts a transcript quietly.
+  const tail = messages.map(dropReasoning).slice(tailStart);
 
   // Ask the model to summarize the head. Append the instruction to the final head
   // message when it is a `user` turn (avoids introducing consecutive user turns).
@@ -284,6 +320,15 @@ export async function compactTranscript(
     content: [{ type: 'text', text: COMPACTION_MARKER + summaryText }],
   };
   return { messages: [summaryMsg, ...tail], summarizedCount: head.length };
+}
+
+/** Strip reasoning blocks from a message, keeping everything else in order. A message
+ *  left with no content at all keeps a single empty text block so the role sequence
+ *  stays well-formed (a content-less message is rejected by most providers). */
+function dropReasoning(m: ChatMessage): ChatMessage {
+  if (!m.content.some((b) => b.type === 'reasoning')) return m;
+  const kept = m.content.filter((b) => b.type !== 'reasoning');
+  return { role: m.role, content: kept.length ? kept : [{ type: 'text', text: '' }] };
 }
 
 /** Does this thrown error look like a hard context-window overflow? Used to trigger
@@ -354,7 +399,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     }
 
     const sendTurn = () =>
-      client.createMessage({ system, messages, tools, onTextDelta: events?.onAssistantDelta, signal });
+      client.createMessage({
+        system,
+        messages,
+        tools,
+        onTextDelta: events?.onAssistantDelta,
+        onReasoningDelta: events?.onReasoningDelta,
+        signal,
+      });
     let res: ModelResponse;
     try {
       try {
@@ -391,6 +443,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
 
     const assistantText = textOf(res.content);
     if (assistantText) events?.onAssistantText?.(assistantText);
+    // R3-335: reasoning stays IN the message sequence — a provider that requires the
+    // block echoed back gets it from `messages`, not from a side channel.
+    for (const b of res.content) if (b.type === 'reasoning') events?.onReasoning?.(b);
     messages.push({ role: 'assistant', content: res.content });
 
     const toolUses = res.content.filter(
