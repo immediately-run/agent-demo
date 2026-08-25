@@ -18,6 +18,7 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
+import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
@@ -68,7 +69,12 @@ export default function ConversationStage() {
     const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools));
+    // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
+    // the model) unless the app holds `vcs:read`.
+    const gitTools = createGitToolset({ catalog });
+    // `withSkills` stays LAST (R3-331): which host skills are offered depends on the
+    // final merged tool list, so it has to see the git tools too.
+    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools, gitTools));
   }, [catalog, stageTree]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
