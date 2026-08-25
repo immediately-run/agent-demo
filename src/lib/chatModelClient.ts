@@ -15,7 +15,14 @@ import {
   type ChatDelta,
   type ContentPart,
 } from '@immediately-run/sdk';
-import type { ChatMessage, ModelClient, TextBlock, ToolUseBlock, TokenUsage } from './agentLoop';
+import type {
+  ChatMessage,
+  ModelClient,
+  ReasoningBlock,
+  TextBlock,
+  TokenUsage,
+  ToolUseBlock,
+} from './agentLoop';
 import type { AgentTool } from './agentTools';
 
 // The loop's Anthropic-shaped conversation → the SDK's tool-aware ChatRequest. The
@@ -25,9 +32,17 @@ function toChatMessages(system: string | undefined, messages: ChatMessage[]): Ch
   const out: ChatReqMessage[] = [];
   if (system) out.push({ role: 'system', content: [{ type: 'text', text: system }] });
   for (const m of messages) {
-    const content: ContentPart[] = m.content.map((b) => {
+    const content: ContentPart[] = m.content.map((b): ContentPart => {
       if (b.type === 'text') return { type: 'text', text: b.text };
       if (b.type === 'tool_use') return { type: 'tool-use', id: b.id, name: b.name, input: b.input };
+      // R3-335 — echo the model's own reasoning back. Some providers REQUIRE it (with
+      // its signature) for the next turn of a tool-use chain to be accepted; the host
+      // adapter puts it in the position that provider wants.
+      if (b.type === 'reasoning') {
+        return b.redactedData !== undefined
+          ? { type: 'reasoning-redacted', data: b.redactedData }
+          : { type: 'reasoning', text: b.text, ...(b.signature ? { signature: b.signature } : {}) };
+      }
       return {
         type: 'tool-result',
         toolCallId: b.tool_use_id,
@@ -65,6 +80,8 @@ export function createChatModelClient(): ModelClient {
       };
       let text = '';
       const toolUses: ToolUseBlock[] = [];
+      // R3-335: reasoning blocks for this turn, in the order the provider emitted them.
+      const reasoning: ReasoningBlock[] = [];
       let stopReason = 'end_turn';
       // Capture the provider `usage` delta (R3-220 token accounting) — the loop
       // reads it to drive compaction/spend rather than discarding it. Absent when
@@ -83,11 +100,21 @@ export function createChatModelClient(): ModelClient {
           req.onTextDelta?.(d.text);
         } else if (d.type === 'tool-call') {
           toolUses.push({ type: 'tool_use', id: d.id, name: d.name, input: (d.input ?? {}) as Record<string, unknown> });
+        } else if (d.type === 'reasoning-delta') {
+          // Live only — the WHOLE block arrives as its own delta, carrying the
+          // signature. Accumulating the slices here instead would silently lose it.
+          req.onReasoningDelta?.(d.text);
+        } else if (d.type === 'reasoning') {
+          reasoning.push({ type: 'reasoning', text: d.text, ...(d.signature ? { signature: d.signature } : {}) });
+        } else if (d.type === 'reasoning-redacted') {
+          reasoning.push({ type: 'reasoning', text: '', redactedData: d.data });
         } else if (d.type === 'usage') {
           usage = { inputTokens: d.inputTokens, outputTokens: d.outputTokens };
         }
       }
-      const content: (TextBlock | ToolUseBlock)[] = [];
+      // Reasoning comes FIRST in the turn: it is what the model did before answering,
+      // and it is the order a provider that requires the echo expects to read back.
+      const content: (TextBlock | ToolUseBlock | ReasoningBlock)[] = [...reasoning];
       if (text) content.push({ type: 'text', text });
       content.push(...toolUses);
       return { content, stopReason, ...(usage ? { usage } : {}) };

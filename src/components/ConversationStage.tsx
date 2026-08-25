@@ -48,6 +48,9 @@ export default function ConversationStage() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState("");
+  // R3-335 — the in-flight reasoning for the current turn (cleared when the whole block
+  // arrives and becomes a transcript row).
+  const [thinking, setThinking] = useState("");
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
   // Why persistence is unavailable, if it is. The conversation store is not a
@@ -187,6 +190,7 @@ export default function ConversationStage() {
     setPrompt("");
     setRunning(true);
     setStreaming("");
+    setThinking("");
     append({ kind: "user", text: kickoff });
     const controller = new AbortController();
     abortRef.current = controller;
@@ -210,6 +214,18 @@ export default function ConversationStage() {
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
+          // R3-335 — the live thinking surface. Now that compaction lets a task run past
+          // a dozen turns, the silent stretches are longer, and "is it stuck or
+          // thinking?" had no answer on screen.
+          onReasoningDelta: (text) => setThinking((t) => t + text),
+          onReasoning: (block) => {
+            setThinking("");
+            append(
+              block.redactedData !== undefined
+                ? { kind: "reasoning", text: "", redacted: true }
+                : { kind: "reasoning", text: block.text },
+            );
+          },
           onAssistantText: (text) => {
             // A turn an `interrupt` steer cut short is its own row, live and on
             // replay — not a reply the model actually wrote.
@@ -249,6 +265,7 @@ export default function ConversationStage() {
       setQueued([]);
       setSteerText("");
       setStreaming("");
+      setThinking("");
       setRunning(false);
       abortRef.current = null;
     }
@@ -385,8 +402,24 @@ export default function ConversationStage() {
             {e.kind === "interrupted" && (
               <span className="ca-interrupted">⟂ turn interrupted by you</span>
             )}
+            {e.kind === "reasoning" && (
+              <details className="ca-reasoning">
+                <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
+                {!e.redacted && <span className="ca-reasoning-body">{e.text}</span>}
+              </details>
+            )}
           </li>
         ))}
+        {thinking && (
+          <li className="ca-line ca-live">
+            {/* Open while it streams — the point is to SHOW that work is happening —
+                then collapsed once it becomes a transcript row. */}
+            <details className="ca-reasoning" open>
+              <summary>thinking…</summary>
+              <span className="ca-reasoning-body">{thinking}</span>
+            </details>
+          </li>
+        )}
         {streaming && (
           <li className="ca-line ca-text ca-live">
             <span className="ca-text">{streaming}</span>
