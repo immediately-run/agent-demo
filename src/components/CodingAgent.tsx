@@ -16,6 +16,7 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
+import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
@@ -69,7 +70,10 @@ export default function CodingAgent() {
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
+    // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
+    // the model) unless the app holds `vcs:read`.
+    const gitTools = createGitToolset({ catalog });
+    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools, gitTools);
   }, [catalog, mounts]);
 
   // The workspace root the fs tools are chrooted to — env grounding for the prompt.

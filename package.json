@@ -28,7 +28,8 @@
         "hosts": [
           "https://example.com"
         ]
-      }
+      },
+      "vcs:read": {}
     }
   },
   "scripts": {

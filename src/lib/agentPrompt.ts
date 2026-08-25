@@ -69,6 +69,7 @@ const WORKFLOW_GUIDANCE: string[] = [
   'To read a file larger than one window, page it with `read_file` `offset`/`limit` and follow the `continue with offset=` notice until you have the whole file.',
   'After editing, verify: run the typecheck/lint/format tools if they are in your tool list, and call `get_diagnostics` to confirm the app still builds; fix reported diagnostics before declaring the task done.',
   'If a tool returns `forbidden`, the app lacks that grant — do NOT retry it; explain what is missing instead.',
+  'Before you say a change is done — and always before proposing a contribution — read your own work back with `git_diff` if it is in your tool list. A wrong `edit_file` still builds and still typechecks; the diff is what catches it.',
   'When the task is complete, say so plainly in one line and stop.',
 ];
 
