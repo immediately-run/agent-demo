@@ -5,6 +5,7 @@
 // Types + a pure function only (no component) — safe to import anywhere.
 
 import { NUDGE_TEXT, COMPACTION_MARKER, type ChatMessage } from './agentLoop';
+import { parseSteer, INTERRUPTED_TURN_TEXT, type SteerMode } from './steering';
 
 export type LogEntry =
   | { kind: 'user'; text: string }
@@ -20,6 +21,19 @@ export type LogEntry =
   // wire form is a `user` message prefixed with COMPACTION_MARKER, so it must be
   // classified here (a "compacted N turns" affordance), not shown as a user turn.
   | { kind: 'compaction'; summary: string }
+  // A mid-run STEER (R3-333): the user corrected the agent without restarting. Its
+  // wire form is a `user` message prefixed with a steer marker, so like `nudge` and
+  // `compaction` it must be classified here — a replayed conversation has to show
+  // the interruption where it happened rather than as an ordinary user turn, and
+  // `mode` is what keeps steer distinguishable from stop on replay (exit 3/4).
+  | { kind: 'steer'; mode: SteerMode; text: string }
+  // The assistant turn an `interrupt` steer cut short.
+  | { kind: 'interrupted' }
+  // The model's own reasoning (R3-335). Its own row because it is NOT the reply — it is
+  // shown collapsed, and a redacted block has no text to show at all. Replay reads it
+  // from the same `reasoning` blocks the loop kept in the message sequence, so a
+  // reloaded conversation is the one that ran.
+  | { kind: 'reasoning'; text: string; redacted?: boolean }
   // An image the agent read (R3-339). Its own row: it is not a tool RESULT string and
   // not something the user typed, and a replayed conversation has to show that the
   // model looked at a picture.
@@ -33,10 +47,20 @@ export function messagesToLog(messages: ChatMessage[]): LogEntry[] {
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'text') {
+        const steer = msg.role === 'user' ? parseSteer(block.text) : null;
         if (msg.role === 'user' && block.text === NUDGE_TEXT) out.push({ kind: 'nudge' });
         else if (msg.role === 'user' && block.text.startsWith(COMPACTION_MARKER))
           out.push({ kind: 'compaction', summary: block.text.slice(COMPACTION_MARKER.length) });
+        else if (steer) out.push({ kind: 'steer', mode: steer.mode, text: steer.text });
+        else if (msg.role === 'assistant' && block.text === INTERRUPTED_TURN_TEXT)
+          out.push({ kind: 'interrupted' });
         else if (block.text.trim()) out.push({ kind: msg.role === 'user' ? 'user' : 'text', text: block.text });
+      } else if (block.type === 'reasoning') {
+        out.push(
+          block.redactedData !== undefined
+            ? { kind: 'reasoning', text: '', redacted: true }
+            : { kind: 'reasoning', text: block.text },
+        );
       } else if (block.type === 'image') {
         out.push({ kind: 'image', mimeType: block.mimeType, data: block.data });
       } else if (block.type === 'tool_use') {
