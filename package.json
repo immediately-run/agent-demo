@@ -28,18 +28,20 @@
         "hosts": [
           "https://example.com"
         ]
-      }
+      },
+      "vcs:read": {}
     }
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run",
-    "preview": "vite preview"
+    "test": "node scripts/gen-sdk-skill.mjs --check && vitest run",
+    "preview": "vite preview",
+    "gen:sdk-skill": "node scripts/gen-sdk-skill.mjs"
   },
   "dependencies": {
-    "@immediately-run/sdk": "^0.37.0",
+    "@immediately-run/sdk": "^0.47.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

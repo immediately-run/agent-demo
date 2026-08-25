@@ -55,6 +55,9 @@
 .ca-prompt-row {
   display: flex;
   gap: 8px;
+  /* R3-333 adds two steer buttons alongside Stop. On a phone the row must wrap
+     rather than squeeze the input to nothing (value 8). */
+  flex-wrap: wrap;
 }
 .ca-prompt {
   flex: 1;
@@ -115,4 +118,108 @@
   color: #7dd3fc;
   font-style: italic;
   opacity: 0.85;
+}
+
+/* Steering (R3-333). The transcript rows: a correction the user injected mid-run,
+   and the assistant turn an interrupt cut short. Both are muted asides — neither is
+   the model talking, and neither is a fresh user prompt. */
+.ca-steer {
+  color: #fbbf24;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+.ca-interrupted {
+  color: #fbbf24;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* What is queued but not yet applied. A follow-up the user cannot see or take back
+   is worse than no queue at all, so each chip carries its own cancel. */
+.ca-queued {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ca-queued-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px dashed var(--border, #2a2a2a);
+  border-radius: 8px;
+}
+.ca-queued-mode {
+  color: #fbbf24;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ca-queued-text {
+  flex: 1;
+  opacity: 0.85;
+  word-break: break-word;
+}
+.ca-queued-cancel {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  /* A comfortable tap target on a phone without stretching the chip. */
+  min-width: 28px;
+  min-height: 28px;
+  font-size: 16px;
+  line-height: 1;
+}
+.ca-queued-cancel:hover {
+  opacity: 1;
+}
+
+/* Steer buttons sit between the input and Stop: same size as Run, visibly not it. */
+.ca-steer-btn {
+  padding: 8px 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ca-steer-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ca-steer-now {
+  border-color: #fbbf24;
+  color: #fbbf24;
+
+/* The model's reasoning (R3-335). Collapsed by default: it is not the reply, and on a
+   long run it is much longer than one. Open while it streams, so the user can see that
+   work is happening during the stretches compaction now makes possible. */
+.ca-reasoning {
+  color: #94a3b8;
+  font-size: 12px;
+}
+.ca-reasoning > summary {
+  cursor: pointer;
+  font-style: italic;
+  /* A comfortable tap target on a phone without a visible box. */
+  padding: 4px 0;
+  list-style-position: outside;
+}
+.ca-reasoning-body {
+  display: block;
+  white-space: pre-wrap;
+  margin: 4px 0 0 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border, #2a2a2a);
+  opacity: 0.85;
+  /* Reasoning can be very long; keep it from pushing the reply off screen. */
+  max-height: 40vh;
+  overflow-y: auto;
 }

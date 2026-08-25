@@ -16,7 +16,9 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
+import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
+import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
@@ -30,6 +32,9 @@ export default function CodingAgent() {
   const [prompt, setPrompt] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState("");
+  // R3-335 — the in-flight reasoning for the current turn (cleared when the whole block
+  // arrives and becomes a transcript row).
+  const [thinking, setThinking] = useState("");
   const [running, setRunning] = useState(false);
 
   // Persistence (Phase 01): keep this run in a durable conversation so it survives
@@ -64,12 +69,19 @@ export default function CodingAgent() {
   // tree. When a stage app's tree is conferred (`type:'worktree'`, AA-23) author THAT;
   // otherwise (standalone agent) fall back to this app's own repo. Re-derived when the
   // conferred mount or its writability changes.
-  const toolset = useMemo(() => {
+  // `withSkills` runs LAST (R3-331): which host skills are offered depends on which
+  // tools this run actually got, so selection needs the merged list.
+  const { toolset, skills } = useMemo(() => {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
     const fsTools = createFsToolset({ root, readOnly });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
+    // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
+    // the model) unless the app holds `vcs:read`.
+    const gitTools = createGitToolset({ catalog });
+    // `withSkills` stays LAST (R3-331): which host skills are offered depends on the
+    // final merged tool list, so it has to see the git tools too.
+    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools, gitTools));
   }, [catalog, mounts]);
 
   // The workspace root the fs tools are chrooted to — env grounding for the prompt.
@@ -85,6 +97,7 @@ export default function CodingAgent() {
     setRunning(true);
     setLog([]);
     setStreaming("");
+    setThinking("");
     append({ kind: "user", text: prompt });
     const controller = new AbortController();
     abortRef.current = controller;
@@ -93,7 +106,7 @@ export default function CodingAgent() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot, today: todayIso() }),
+        system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot, today: todayIso() }),
         prompt,
         // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
         signal: controller.signal,
@@ -102,6 +115,18 @@ export default function CodingAgent() {
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
           onAssistantDelta: (text) => setStreaming((s) => s + text),
+          // R3-335 — the live thinking surface. Now that compaction lets a task run past
+          // a dozen turns, the silent stretches are longer, and "is it stuck or
+          // thinking?" had no answer on screen.
+          onReasoningDelta: (text) => setThinking((t) => t + text),
+          onReasoning: (block) => {
+            setThinking("");
+            append(
+              block.redactedData !== undefined
+                ? { kind: "reasoning", text: "", redacted: true }
+                : { kind: "reasoning", text: block.text },
+            );
+          },
           onAssistantText: (text) => {
             if (text.trim()) append({ kind: "text", text });
             setStreaming("");
@@ -119,6 +144,7 @@ export default function CodingAgent() {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
     } finally {
       setStreaming("");
+      setThinking("");
       setRunning(false);
       abortRef.current = null;
     }
@@ -193,8 +219,24 @@ export default function CodingAgent() {
                 ⚑ compacted earlier turns to stay within the context window
               </span>
             )}
+            {e.kind === "reasoning" && (
+              <details className="ca-reasoning">
+                <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
+                {!e.redacted && <span className="ca-reasoning-body">{e.text}</span>}
+              </details>
+            )}
           </li>
         ))}
+        {thinking && (
+          <li className="ca-line ca-live">
+            {/* Open while it streams — the point is to SHOW that work is happening —
+                then collapsed once it becomes a transcript row. */}
+            <details className="ca-reasoning" open>
+              <summary>thinking…</summary>
+              <span className="ca-reasoning-body">{thinking}</span>
+            </details>
+          </li>
+        )}
         {streaming && (
           <li className="ca-line ca-text ca-live">
             <span className="ca-text">{streaming}</span>
