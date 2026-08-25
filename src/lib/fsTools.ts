@@ -12,7 +12,7 @@
 // surfacing a raw `EROFS` to the model.
 
 import fs from 'fs';
-import type { ToolExecutor } from './agentLoop';
+import type { ImageBlock, ToolExecutor, ToolOutcome } from './agentLoop';
 import type { Toolset } from './toolset';
 
 /** The slice of `fs.promises` these tools use — narrowed so tests can inject an
@@ -24,6 +24,28 @@ export interface FsLike {
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   stat(path: string): Promise<FsStat>;
   unlink(path: string): Promise<void>;
+}
+
+/**
+ * The wider slice these tools reach for since R3-338 — the same `fs.promises`, minus the
+ * agent's own narrowing.
+ *
+ * `FsLike` above stayed as it was because `projectTools` shares it and needs none of
+ * this. What is added here is exactly what the refactoring primitives require and the
+ * port has always had:
+ *
+ *  - `rename`, so a move is ONE call. Doing it as read + write + delete round-trips the
+ *    whole file through the model's context for no reason and has three chances to
+ *    half-finish.
+ *  - a BYTE-mode `readFile` + a `Uint8Array`-accepting `writeFile`, so copying an image
+ *    or any other binary asset does not corrupt it. Reading a PNG as UTF-8 and writing
+ *    it back mangles it *silently* — the file still exists, at roughly the right size.
+ */
+export interface FsPortLike extends Omit<FsLike, 'readFile' | 'writeFile'> {
+  readFile(path: string, encoding: 'utf8'): Promise<string>;
+  readFile(path: string): Promise<Uint8Array>;
+  writeFile(path: string, data: string | Uint8Array): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
 }
 export interface FsDirent {
   name: string;
@@ -85,15 +107,58 @@ export interface FsToolsOptions {
   /** Absolute mount path the tools are chrooted to (e.g. the app working tree). */
   root: string;
   /** Defaults to the host `fs.promises`. Injected in tests. */
-  fs?: FsLike;
+  fs?: FsPortLike;
   /** When the mount is `ro`, writes/deletes are refused locally (no raw EROFS). */
   readOnly?: boolean;
+  /**
+   * Does the resolved model accept images (R3-339)? From
+   * `describeChat().features.vision`. When false, `read_file` on an image SAYS SO in the
+   * tool result rather than sending something that errors upstream — absent rather than
+   * fake, like the rest of the toolset. Defaults to false: a caller that does not know
+   * must not gamble the user's request on a guess.
+   */
+  vision?: boolean;
 }
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = ToolOutcome;
 
 // Caps that keep a single tool result from blowing the model's context.
 const READ_CAP = 64 * 1024; // bytes of a file returned by read_file
+// R3-339 — the largest image `read_file` will hand the model. Images are big and count
+// against the context budget R3-220 manages, so there has to be a ceiling, and it has to
+// be NAMED in the refusal rather than silently truncating (a truncated image is not a
+// smaller image, it is a corrupt one). ~1.5 MB of source bytes ≈ 2 MB of base64, which
+// comfortably covers a screenshot or a design mockup.
+const IMAGE_CAP = 1_500 * 1024;
+/**
+ * Image types the transport can carry, mirroring the SDK's `mimeTypeFor` table.
+ *
+ * WHY A LOCAL COPY rather than importing `mimeTypeFor` from `@immediately-run/sdk`:
+ * this module is deliberately dependency-light so it unit-tests without a host — every
+ * suite that touches it (and `projectTools`, which shares its types) would otherwise
+ * have to mock the whole SDK barrel to exercise a path lookup. Eleven lines of table is
+ * the cheaper honesty. `mimeTypeFor` is the source it mirrors; `imageMime.test.ts`
+ * pins the agreement.
+ *
+ * `.svg` is deliberately ABSENT even though the SDK's table names it — see `read_file`.
+ */
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+};
+
+/** The image MIME type for a path, or `undefined` when it is not a viewable image. */
+export function imageMimeFor(path: string): string | undefined {
+  const dot = path.lastIndexOf('.');
+  if (dot === -1) return undefined;
+  return IMAGE_MIME_BY_EXT[path.slice(dot + 1).toLowerCase()];
+}
 const LIST_CAP = 1000; // entries from list_dir
 const MATCH_CAP = 200; // glob paths / grep hits
 const WALK_CAP = 5000; // files visited by a glob/grep walk
@@ -122,6 +187,32 @@ export function resolveWithin(root: string, rel: string): string | null {
   const joined = normalizePosix(`${base}/${rel}`);
   if (joined !== base && !joined.startsWith(`${base}/`)) return null;
   return joined;
+}
+
+/** Name a non-viewable binary by its extension, so the refusal says WHAT it is rather
+ *  than just "unreadable" — the model can then decide whether it even needed it. */
+function describeBinary(path: string): string {
+  const dot = path.lastIndexOf('.');
+  const ext = dot === -1 ? '' : path.slice(dot + 1).toLowerCase();
+  return ext ? `a .${ext} file` : 'no file extension';
+}
+
+/** base64 without Node's Buffer — the sandbox has `btoa`, not Buffer. Chunked so a
+ *  megabyte-scale image does not blow the argument limit of `String.fromCharCode`. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** Did a UTF-8 read fail because the bytes are not text? ZenFS/node surface this as a
+ *  TypeError from the decoder rather than an errno, so it needs its own recognition. */
+function isDecodeError(e: unknown): boolean {
+  const msg = ((e as Error)?.message ?? String(e)).toLowerCase();
+  return /utf-?8|decode|invalid.*byte|malformed/.test(msg);
 }
 
 const code = (e: unknown): string | undefined => (e as { code?: string })?.code;
@@ -157,18 +248,121 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
+/** One requested replacement. `replace_all` applies per ENTRY, so a batch can mix a
+ *  unique-anchor edit with a fan-out rename. */
+export interface EditSpec {
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+}
+
+/** Where one entry matched, resolved against the ORIGINAL text. */
+interface EditSpan {
+  start: number;
+  end: number;
+  replacement: string;
+  /** 1-indexed entry number, for error messages the model can act on. */
+  entry: number;
+}
+
+/** All non-overlapping occurrences of `needle` in `haystack` (same counting as
+ *  `split(needle)`, so a self-overlapping literal like `aa` in `aaa` matches once). */
+function occurrences(haystack: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) {
+    out.push(i);
+  }
+  return out;
+}
+
+/**
+ * Plan a batch of edits against the file AS READ (R3-337).
+ *
+ * Every entry is matched against the ORIGINAL text, never against the result of the
+ * previous entry — otherwise the outcome would be order-dependent and hard for a model
+ * to reason about. The plan is then all-or-nothing: any failure returns an error naming
+ * WHICH entry and why, and nothing is written, because a half-applied batch leaves the
+ * file in a state the model did not intend and cannot easily diagnose.
+ *
+ * Overlaps are REFUSED rather than resolved. Two entries whose spans intersect are a
+ * mistake in the request, and silently picking one is exactly the near-invisible wrong
+ * result this tool exists to reduce.
+ */
+export function planEdits(text: string, edits: EditSpec[]): { ok: true; text: string; sites: number } | { ok: false; error: string } {
+  const spans: EditSpan[] = [];
+  for (let i = 0; i < edits.length; i++) {
+    const entry = i + 1;
+    const { old_string: oldStr, new_string: newStr } = edits[i];
+    if (typeof oldStr !== 'string' || oldStr === '') {
+      return { ok: false, error: `edit ${entry}: "old_string" must be a non-empty string` };
+    }
+    if (typeof newStr !== 'string') {
+      return { ok: false, error: `edit ${entry}: "new_string" must be a string` };
+    }
+    if (oldStr === newStr) {
+      return { ok: false, error: `edit ${entry}: "old_string" and "new_string" are identical — nothing to do` };
+    }
+    const at = occurrences(text, oldStr);
+    if (at.length === 0) {
+      return { ok: false, error: `edit ${entry}: old_string not found — it must match the file exactly (whitespace included). No edits were applied.` };
+    }
+    if (at.length > 1 && edits[i].replace_all !== true) {
+      return {
+        ok: false,
+        error: `edit ${entry}: old_string is not unique (${at.length} matches) — add surrounding context to make it unique, or set replace_all on this entry. No edits were applied.`,
+      };
+    }
+    for (const start of at) spans.push({ start, end: start + oldStr.length, replacement: newStr, entry });
+  }
+  if (spans.length === 0) return { ok: false, error: 'no edits supplied' };
+
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 1; i < spans.length; i++) {
+    if (spans[i].start < spans[i - 1].end) {
+      const [a, b] = [spans[i - 1].entry, spans[i].entry];
+      return {
+        ok: false,
+        error:
+          a === b
+            ? `edit ${a} overlaps itself at offset ${spans[i].start} — no edits were applied`
+            : `edits ${a} and ${b} overlap at offset ${spans[i].start} — they cannot both apply. Rewrite them as one edit. No edits were applied.`,
+      };
+    }
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const span of spans) {
+    out += text.slice(cursor, span.start) + span.replacement;
+    cursor = span.end;
+  }
+  out += text.slice(cursor);
+  return { ok: true, text: out, sites: spans.length };
+}
+
 /**
  * Build the filesystem {@link Toolset} chrooted to `opts.root`. The returned
  * `tools` are handed to the model; `execute` runs them through the host `fs`.
  */
 export function createFsToolset(opts: FsToolsOptions): Toolset {
   const root = normalizePosix(opts.root);
-  const p: FsLike = opts.fs ?? (fs.promises as unknown as FsLike);
+  const p: FsPortLike = opts.fs ?? (fs.promises as unknown as FsPortLike);
   const readOnly = opts.readOnly ?? false;
+  const vision = opts.vision ?? false;
 
   const rel = (abs: string): string => {
     const r = abs === root ? '' : abs.slice(root.length + 1);
     return r === '' ? '.' : r;
+  };
+
+  /** Does a path exist? Used to refuse a clobbering move/copy unless asked (R3-338). */
+  const exists = async (abs: string): Promise<boolean> => {
+    try {
+      await p.stat(abs);
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   // Depth-first file walk, bounded by WALK_CAP and skipping heavy dirs. Yields
@@ -196,8 +390,41 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
 
   const handlers: Record<string, (input: Record<string, unknown>) => Promise<ToolResult>> = {
     async read_file(input) {
-      const abs = resolveWithin(root, String(input.path ?? ''));
+      const relPath = String(input.path ?? '');
+      const abs = resolveWithin(root, relPath);
       if (!abs) return notFound;
+
+      // R3-339 — an IMAGE is read as bytes and handed over as an image part, not
+      // mangled through UTF-8 and not silently skipped. `.svg` is deliberately excluded
+      // from IMAGE_MIME even though the SDK's table names it: an SVG is TEXT, and it is
+      // also source the agent may want to EDIT, so it reads as text and stays editable.
+      // Making that predictable is the point — the surprise would be the failure.
+      const mime = imageMimeFor(relPath);
+      if (mime) {
+        if (!vision) {
+          return {
+            content: `${rel(abs)} is a ${mime} image, but the model in use cannot accept images — describe it in words or work from the file's name and the code that references it.`,
+            isError: true,
+          };
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = await p.readFile(abs);
+        } catch (e) {
+          return fsError(e);
+        }
+        if (bytes.length > IMAGE_CAP) {
+          // Refused BEFORE it is sent, and the cap is named. Truncating an image does
+          // not make a smaller image, it makes a corrupt one.
+          return {
+            content: `${rel(abs)} is ${bytes.length} bytes, over the ${IMAGE_CAP}-byte image limit — resize or crop it first.`,
+            isError: true,
+          };
+        }
+        const image: ImageBlock = { type: 'image', mimeType: mime, data: toBase64(bytes) };
+        return { content: `[image ${rel(abs)} — ${mime}, ${bytes.length} bytes]`, images: [image] };
+      }
+
       const offsetGiven = input.offset !== undefined && input.offset !== null;
       const limitGiven = input.limit !== undefined && input.limit !== null;
       try {
@@ -262,6 +489,14 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
         }
         return { content: body };
       } catch (e) {
+        // R3-339 — a non-image binary is still refused, but by NAME rather than as a
+        // bare decode failure: "unreadable" tells the model nothing it can act on.
+        if (isDecodeError(e)) {
+          return {
+            content: `${rel(abs)} is not UTF-8 text and is not an image type the model can view (${describeBinary(relPath)}) — read_file cannot show it.`,
+            isError: true,
+          };
+        }
         return fsError(e);
       }
     },
@@ -291,39 +526,57 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
       const abs = resolveWithin(root, String(input.path ?? ''));
       if (!abs) return notFound;
-      const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
-      const newStr = typeof input.new_string === 'string' ? input.new_string : '';
-      if (!oldStr) return { content: 'edit_file requires a non-empty "old_string"', isError: true };
-      if (oldStr === newStr) return { content: '"old_string" and "new_string" are identical — nothing to do', isError: true };
-      const replaceAll = input.replace_all === true;
+      // R3-337 — one call, N sites. `edits[]` is the batch form; the single
+      // `old_string`/`new_string` pair is kept because it is the right shape for a
+      // one-site change and the prompt already teaches it. Both go through the same
+      // planner, so the batch of one and the single pair cannot diverge.
+      const batch = Array.isArray(input.edits) ? (input.edits as unknown[]) : null;
+      const specs: EditSpec[] = batch
+        ? batch.map((e) => {
+            const o = (e ?? {}) as Record<string, unknown>;
+            return {
+              old_string: typeof o.old_string === 'string' ? o.old_string : '',
+              new_string: typeof o.new_string === 'string' ? o.new_string : '',
+              replace_all: o.replace_all === true,
+            };
+          })
+        : [
+            {
+              old_string: typeof input.old_string === 'string' ? input.old_string : '',
+              new_string: typeof input.new_string === 'string' ? input.new_string : '',
+              replace_all: input.replace_all === true,
+            },
+          ];
+      if (batch && specs.length === 0) {
+        return { content: 'edit_file "edits" was empty — supply at least one { old_string, new_string }', isError: true };
+      }
+      if (!batch && !specs[0].old_string) {
+        return { content: 'edit_file requires a non-empty "old_string" (or an "edits" array)', isError: true };
+      }
       let text: string;
       try {
         text = await p.readFile(abs, 'utf8');
       } catch (e) {
         return fsError(e);
       }
-      // Count via split (no regex — `old_string` is a literal, and a `$`/`\` in
-      // `new_string` must NOT be reinterpreted the way String.replace would).
-      const count = text.split(oldStr).length - 1;
-      if (count === 0) return { content: 'old_string not found — it must match the file exactly (whitespace included)', isError: true };
-      if (count > 1 && !replaceAll) {
-        return { content: `old_string is not unique (${count} matches) — add surrounding context to make it unique, or pass replace_all: true`, isError: true };
-      }
-      let next: string;
-      if (replaceAll) {
-        next = text.split(oldStr).join(newStr);
-      } else {
-        const at = text.indexOf(oldStr);
-        next = text.slice(0, at) + newStr + text.slice(at + oldStr.length);
+      // Literal matching throughout — never a regex — so a `$`/backslash in
+      // `new_string` is not reinterpreted the way String.replace would.
+      const plan = planEdits(text, specs);
+      if (!plan.ok) {
+        // All-or-nothing: nothing has been written, and the message names the entry.
+        // The single-pair form has no entry to number, so its message reads as it always
+        // did. A one-entry BATCH still numbers, because the caller wrote `edits[0]`.
+        return { content: batch ? plan.error : plan.error.replace(/^edit 1: /, ''), isError: true };
       }
       try {
-        await p.writeFile(abs, next);
+        await p.writeFile(abs, plan.text);
       } catch (e) {
         return fsError(e);
       }
-      const delta = next.length - text.length;
-      const where = replaceAll ? `${count} replacements` : '1 replacement';
-      return { content: `edited ${rel(abs)} (${where}, ${delta >= 0 ? '+' : ''}${delta} bytes)` };
+      const delta = plan.text.length - text.length;
+      const where = plan.sites === 1 ? '1 replacement' : `${plan.sites} replacements`;
+      const across = specs.length > 1 ? ` across ${specs.length} edits` : '';
+      return { content: `edited ${rel(abs)} (${where}${across}, ${delta >= 0 ? '+' : ''}${delta} bytes)` };
     },
 
     async list_dir(input) {
@@ -398,6 +651,103 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       return { content: hits.length ? hits.join('\n') : '(no matches)' };
     },
 
+    // R3-338 — move/copy/replace: the refactoring primitives. The port already had
+    // `rename`; the agent's own `FsLike` narrowing is what hid it.
+    async move_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      // BOTH paths go through the resolver. A move is the one write that names two
+      // places, so it is also the one that could become a way to write outside the
+      // mount by naming a clever destination — an escape on either side reads back as
+      // "not found", never a disclosure (T24).
+      const from = resolveWithin(root, String(input.from ?? ''));
+      const to = resolveWithin(root, String(input.to ?? ''));
+      if (!from || !to) return notFound;
+      if (from === to) return { content: '"from" and "to" are the same path — nothing to do', isError: true };
+      try {
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.rename(from, to);
+        return { content: `moved ${rel(from)} → ${rel(to)}` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
+
+    async copy_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      const from = resolveWithin(root, String(input.from ?? ''));
+      const to = resolveWithin(root, String(input.to ?? ''));
+      if (!from || !to) return notFound;
+      if (from === to) return { content: '"from" and "to" are the same path — nothing to do', isError: true };
+      try {
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        // BYTES, not text. Reading a PNG as UTF-8 and writing it back mangles it, and
+        // the mangling is silent — the file still exists, at roughly the right size.
+        const bytes = await p.readFile(from);
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.writeFile(to, bytes);
+        return { content: `copied ${rel(from)} → ${rel(to)} (${bytes.length} bytes)` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
+
+    async replace_in_files(input) {
+      const dryRun = input.dry_run === true;
+      if (readOnly && !dryRun) return { content: 'read-only: this mount cannot be written', isError: true };
+      const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
+      const newStr = typeof input.new_string === 'string' ? input.new_string : '';
+      if (!oldStr) return { content: 'replace_in_files requires a non-empty "old_string"', isError: true };
+      if (oldStr === newStr) return { content: '"old_string" and "new_string" are identical — nothing to do', isError: true };
+      const start = resolveWithin(root, String(input.path ?? '.'));
+      if (!start) return notFound;
+      const matcher = typeof input.glob === 'string' && input.glob ? globToRegExp(input.glob) : null;
+
+      const files: string[] = [];
+      await walk(start, files, { n: WALK_CAP });
+      const changed: Array<{ path: string; sites: number }> = [];
+      let total = 0;
+      for (const abs of files) {
+        const r = rel(abs);
+        if (matcher && !matcher.test(r)) continue;
+        let text: string;
+        try {
+          text = await p.readFile(abs, 'utf8');
+        } catch {
+          continue; // binary/unreadable — a text replace has nothing to say about it
+        }
+        const sites = text.split(oldStr).length - 1;
+        if (sites === 0) continue;
+        changed.push({ path: r, sites });
+        total += sites;
+        if (changed.length >= MATCH_CAP) break;
+        if (dryRun) continue;
+        try {
+          await p.writeFile(abs, text.split(oldStr).join(newStr));
+        } catch (e) {
+          // Report what already changed rather than pretending the whole run failed.
+          const partial = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
+          return { content: `failed writing ${r}: ${message(e)}\nchanged so far:\n${partial}`, isError: true };
+        }
+      }
+      if (changed.length === 0) return { content: '(no matches)' };
+      // Per-file counts, always. A replace that reports only "done" is unreviewable —
+      // and this is exactly the operation whose blast radius should be read back as a
+      // diff before it is proposed.
+      const lines = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
+      const head = dryRun
+        ? `would change ${total} site(s) in ${changed.length} file(s) — nothing written`
+        : `changed ${total} site(s) in ${changed.length} file(s)`;
+      const more = changed.length >= MATCH_CAP ? `\n[stopped at ${MATCH_CAP} files — narrow with "path" or "glob"]` : '';
+      return { content: `${head}\n${lines}${more}` };
+    },
+
     async delete_file(input) {
       if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
       const abs = resolveWithin(root, String(input.path ?? ''));
@@ -419,13 +769,16 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const str = (description: string) => ({ type: 'string', description });
 
   const tools: Toolset['tools'] = [
-    { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
+    { name: 'read_file', description: 'Read a workspace file. An IMAGE (png/jpeg/gif/webp/avif/bmp/ico) comes back as a picture you can look at, when the model in use accepts images; an `.svg` reads as text, because it is source you may want to edit. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
     { name: 'write_file', description: 'Create or **overwrite** a whole workspace file (parent dirs are created). Use for NEW files or full rewrites. To change part of an EXISTING file, prefer `edit_file` — do not regenerate a large file just to add a few lines. Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
-    { name: 'edit_file', description: 'Make a surgical edit to an existing file by replacing an exact snippet — the right tool for changing or adding a few lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' } }) },
+    { name: 'edit_file', description: 'Make surgical edits to an existing file by replacing exact snippets — the right tool for changing or adding lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition. **To change several places in one file, pass `edits` and do it in ONE call** — every entry is matched against the file as it is now, overlapping entries are refused, and if any entry fails NOTHING is applied.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique. Omit when using `edits`.'), new_string: str('Replacement text, inserted verbatim. Omit when using `edits`.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' }, edits: { type: 'array', description: 'Several replacements applied in one call, each matched against the ORIGINAL file (not against each other). All-or-nothing.', items: obj({ old_string: str('Exact text to replace; unique unless replace_all is set on this entry.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence of THIS entry (default false).' } }) } }) },
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },
     { name: 'stat', description: 'Stat a workspace path: returns its type, size, and mtime.', input_schema: obj({ path: str('Workspace-relative path.') }) },
     { name: 'glob', description: 'Find workspace files matching a glob (`**`, `*`, `?`), e.g. "src/**/*.ts".', input_schema: obj({ pattern: str('Glob pattern, workspace-relative.') }) },
     { name: 'grep', description: 'Search workspace file contents with a JS regex. Returns `path:line: text` hits.', input_schema: obj({ pattern: str('JS regular expression.'), path: str('Subtree to search (default: root).'), flags: str('Regex flags, e.g. "i".') }) },
+    { name: 'move_file', description: 'Move or RENAME a workspace file in one call — the content never passes through you, so prefer this over read + write + delete. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
+    { name: 'copy_file', description: 'Copy a workspace file byte-for-byte — safe for images and other binary assets, which a read-then-write through text would corrupt. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
+    { name: 'replace_in_files', description: 'Replace an exact literal string across many files — the tool for renaming a symbol project-wide. Scope it with `path` and/or `glob`. Reports WHICH files changed and how many sites in each. Run it with `dry_run: true` first to see the blast radius, and read the result back with a diff before proposing it.', input_schema: obj({ old_string: str('Exact literal text to replace (not a regex).'), new_string: str('Replacement text, inserted verbatim.'), path: str('Subtree to search (default: workspace root).'), glob: str('Only files whose workspace-relative path matches this glob, e.g. "src/**/*.ts".'), dry_run: { type: 'boolean', description: 'Report what WOULD change without writing anything (default false).' } }) },
     { name: 'delete_file', description: 'Delete a workspace file.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
   ];
 

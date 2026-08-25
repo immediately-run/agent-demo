@@ -223,3 +223,16 @@
   max-height: 40vh;
   overflow-y: auto;
 }
+
+/* An image the agent read from the workspace (R3-339). Bounded so a screenshot cannot
+   take over the transcript, and it scales down on a phone rather than forcing a
+   horizontal scroll. */
+.ca-image {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+}

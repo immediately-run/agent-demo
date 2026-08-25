@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, type FsLike, type FsDirent, type FsStat } from './fsTools';
+import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
 
 // AA-23: the workbench agent must author the STAGE app's conferred working tree
 // (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
@@ -61,10 +61,10 @@ describe('findConferredWorktree (stage agent — never self)', () => {
   });
 });
 
-// A tiny in-memory fs implementing the FsLike subset the tools use. Paths are
+// A tiny in-memory fs implementing the FsPortLike subset the tools use. Paths are
 // absolute POSIX. Good enough to exercise chroot resolution, walking, and the
 // read-only / not-found branches without touching a real disk.
-class MemFs implements FsLike {
+class MemFs implements FsPortLike {
   files = new Map<string, string>();
   dirs = new Set<string>(['/']);
   constructor(seed: Record<string, string> = {}) {
@@ -81,13 +81,21 @@ class MemFs implements FsLike {
   private err(code: string): Error {
     return Object.assign(new Error(code), { code });
   }
-  async readFile(path: string): Promise<string> {
+  // R3-338 added a BYTE-mode read to the port; the fake mirrors both overloads so a
+  // binary round-trip is testable without a real fs.
+  async readFile(path: string, encoding?: 'utf8'): Promise<string & Uint8Array> {
     if (this.dirs.has(path) && !this.files.has(path)) throw this.err('EISDIR');
     if (!this.files.has(path)) throw this.err('ENOENT');
-    return this.files.get(path)!;
+    const text = this.files.get(path)!;
+    return (encoding === 'utf8' ? text : new TextEncoder().encode(text)) as string & Uint8Array;
   }
-  async writeFile(path: string, data: string): Promise<void> {
-    this.put(path, data);
+  async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+    this.put(path, typeof data === 'string' ? data : new TextDecoder().decode(data));
+  }
+  async rename(from: string, to: string): Promise<void> {
+    if (!this.files.has(from)) throw this.err('ENOENT');
+    this.put(to, this.files.get(from)!);
+    this.files.delete(from);
   }
   async mkdir(path: string): Promise<unknown> {
     let d = path;
@@ -134,9 +142,21 @@ const seed = () =>
 const ts = (fs: MemFs, readOnly = false) => createFsToolset({ root: '/app', fs, readOnly });
 
 describe('fsTools — mount-chroot filesystem tools (§3.3 phase 2)', () => {
-  it('exposes the eight file tools', () => {
+  it('exposes the file tools — the original eight plus R3-338\'s three refactoring primitives', () => {
     const names = ts(seed()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['delete_file', 'edit_file', 'glob', 'grep', 'list_dir', 'read_file', 'stat', 'write_file']);
+    expect(names).toEqual([
+      'copy_file',
+      'delete_file',
+      'edit_file',
+      'glob',
+      'grep',
+      'list_dir',
+      'move_file',
+      'read_file',
+      'replace_in_files',
+      'stat',
+      'write_file',
+    ]);
   });
 
   it('read_file returns content; missing path → not found', async () => {

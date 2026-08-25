@@ -35,6 +35,9 @@ function toChatMessages(system: string | undefined, messages: ChatMessage[]): Ch
     const content: ContentPart[] = m.content.map((b): ContentPart => {
       if (b.type === 'text') return { type: 'text', text: b.text };
       if (b.type === 'tool_use') return { type: 'tool-use', id: b.id, name: b.name, input: b.input };
+      // R3-339 — an image the model should LOOK at. The transport already accepts it
+      // (`features.vision`); the loop just never produced one until now.
+      if (b.type === 'image') return { type: 'image', mimeType: b.mimeType, data: b.data };
       // R3-335 — echo the model's own reasoning back. Some providers REQUIRE it (with
       // its signature) for the next turn of a tool-use chain to be accepted; the host
       // adapter puts it in the position that provider wants.

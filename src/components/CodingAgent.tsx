@@ -69,11 +69,16 @@ export default function CodingAgent() {
   // tree. When a stage app's tree is conferred (`type:'worktree'`, AA-23) author THAT;
   // otherwise (standalone agent) fall back to this app's own repo. Re-derived when the
   // conferred mount or its writability changes.
+  // R3-339 — does the model the user configured accept images? The tool is told, so a
+  // `read_file` on a PNG can SAY the model cannot look at it instead of sending
+  // something that errors upstream. Re-read when the provider changes.
+  const vision = useMemo(() => describeChat()?.features.vision === true, []);
+
   // `withSkills` runs LAST (R3-331): which host skills are offered depends on which
   // tools this run actually got, so selection needs the merged list.
   const { toolset, skills } = useMemo(() => {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
-    const fsTools = createFsToolset({ root, readOnly });
+    const fsTools = createFsToolset({ root, readOnly, vision });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
@@ -82,7 +87,7 @@ export default function CodingAgent() {
     // `withSkills` stays LAST (R3-331): which host skills are offered depends on the
     // final merged tool list, so it has to see the git tools too.
     return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools, gitTools));
-  }, [catalog, mounts]);
+  }, [catalog, mounts, vision]);
 
   // The workspace root the fs tools are chrooted to — env grounding for the prompt.
   const workspaceRoot = useMemo(
@@ -224,6 +229,13 @@ export default function CodingAgent() {
                 <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
                 {!e.redacted && <span className="ca-reasoning-body">{e.text}</span>}
               </details>
+            )}
+            {e.kind === "image" && (
+              <img
+                className="ca-image"
+                src={`data:${e.mimeType};base64,${e.data}`}
+                alt="Image the agent read from the workspace"
+              />
             )}
           </li>
         ))}

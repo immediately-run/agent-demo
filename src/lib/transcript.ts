@@ -33,7 +33,11 @@ export type LogEntry =
   // shown collapsed, and a redacted block has no text to show at all. Replay reads it
   // from the same `reasoning` blocks the loop kept in the message sequence, so a
   // reloaded conversation is the one that ran.
-  | { kind: 'reasoning'; text: string; redacted?: boolean };
+  | { kind: 'reasoning'; text: string; redacted?: boolean }
+  // An image the agent read (R3-339). Its own row: it is not a tool RESULT string and
+  // not something the user typed, and a replayed conversation has to show that the
+  // model looked at a picture.
+  | { kind: 'image'; mimeType: string; data: string };
 
 /** Flatten a transcript into log entries. Tool results are correlated back to the
  *  tool name via the assistant `tool_use` id that produced them. */
@@ -57,6 +61,8 @@ export function messagesToLog(messages: ChatMessage[]): LogEntry[] {
             ? { kind: 'reasoning', text: '', redacted: true }
             : { kind: 'reasoning', text: block.text },
         );
+      } else if (block.type === 'image') {
+        out.push({ kind: 'image', mimeType: block.mimeType, data: block.data });
       } else if (block.type === 'tool_use') {
         nameById.set(block.id, block.name);
         out.push({ kind: 'tool', name: block.name, input: block.input });
