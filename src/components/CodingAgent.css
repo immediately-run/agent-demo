@@ -120,32 +120,6 @@
   opacity: 0.85;
 }
 
-<<<<<<< HEAD
-/* The model's reasoning (R3-335). Collapsed by default: it is not the reply, and on a
-   long run it is much longer than one. Open while it streams, so the user can see that
-   work is happening during the stretches compaction now makes possible. */
-.ca-reasoning {
-  color: #94a3b8;
-  font-size: 12px;
-}
-.ca-reasoning > summary {
-  cursor: pointer;
-  font-style: italic;
-  /* A comfortable tap target on a phone without a visible box. */
-  padding: 4px 0;
-  list-style-position: outside;
-}
-.ca-reasoning-body {
-  display: block;
-  white-space: pre-wrap;
-  margin: 4px 0 0 14px;
-  padding-left: 8px;
-  border-left: 2px solid var(--border, #2a2a2a);
-  opacity: 0.85;
-  /* Reasoning can be very long; keep it from pushing the reply off screen. */
-  max-height: 40vh;
-  overflow-y: auto;
-=======
 /* Steering (R3-333). The transcript rows: a correction the user injected mid-run,
    and the assistant turn an interrupt cut short. Both are muted asides — neither is
    the model talking, and neither is a fresh user prompt. */
@@ -223,5 +197,29 @@
 .ca-steer-now {
   border-color: #fbbf24;
   color: #fbbf24;
->>>>>>> origin/main
+
+/* The model's reasoning (R3-335). Collapsed by default: it is not the reply, and on a
+   long run it is much longer than one. Open while it streams, so the user can see that
+   work is happening during the stretches compaction now makes possible. */
+.ca-reasoning {
+  color: #94a3b8;
+  font-size: 12px;
+}
+.ca-reasoning > summary {
+  cursor: pointer;
+  font-style: italic;
+  /* A comfortable tap target on a phone without a visible box. */
+  padding: 4px 0;
+  list-style-position: outside;
+}
+.ca-reasoning-body {
+  display: block;
+  white-space: pre-wrap;
+  margin: 4px 0 0 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border, #2a2a2a);
+  opacity: 0.85;
+  /* Reasoning can be very long; keep it from pushing the reply off screen. */
+  max-height: 40vh;
+  overflow-y: auto;
 }
