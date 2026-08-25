@@ -5,6 +5,7 @@
 // Types + a pure function only (no component) — safe to import anywhere.
 
 import { NUDGE_TEXT, COMPACTION_MARKER, type ChatMessage } from './agentLoop';
+import { parseSteer, INTERRUPTED_TURN_TEXT, type SteerMode } from './steering';
 
 export type LogEntry =
   | { kind: 'user'; text: string }
@@ -19,7 +20,15 @@ export type LogEntry =
   // A context compaction (R3-220): the loop folded older turns into a summary. Its
   // wire form is a `user` message prefixed with COMPACTION_MARKER, so it must be
   // classified here (a "compacted N turns" affordance), not shown as a user turn.
-  | { kind: 'compaction'; summary: string };
+  | { kind: 'compaction'; summary: string }
+  // A mid-run STEER (R3-333): the user corrected the agent without restarting. Its
+  // wire form is a `user` message prefixed with a steer marker, so like `nudge` and
+  // `compaction` it must be classified here — a replayed conversation has to show
+  // the interruption where it happened rather than as an ordinary user turn, and
+  // `mode` is what keeps steer distinguishable from stop on replay (exit 3/4).
+  | { kind: 'steer'; mode: SteerMode; text: string }
+  // The assistant turn an `interrupt` steer cut short.
+  | { kind: 'interrupted' };
 
 /** Flatten a transcript into log entries. Tool results are correlated back to the
  *  tool name via the assistant `tool_use` id that produced them. */
@@ -29,9 +38,13 @@ export function messagesToLog(messages: ChatMessage[]): LogEntry[] {
   for (const msg of messages) {
     for (const block of msg.content) {
       if (block.type === 'text') {
+        const steer = msg.role === 'user' ? parseSteer(block.text) : null;
         if (msg.role === 'user' && block.text === NUDGE_TEXT) out.push({ kind: 'nudge' });
         else if (msg.role === 'user' && block.text.startsWith(COMPACTION_MARKER))
           out.push({ kind: 'compaction', summary: block.text.slice(COMPACTION_MARKER.length) });
+        else if (steer) out.push({ kind: 'steer', mode: steer.mode, text: steer.text });
+        else if (msg.role === 'assistant' && block.text === INTERRUPTED_TURN_TEXT)
+          out.push({ kind: 'interrupted' });
         else if (block.text.trim()) out.push({ kind: msg.role === 'user' ? 'user' : 'text', text: block.text });
       } else if (block.type === 'tool_use') {
         nameById.set(block.id, block.name);
