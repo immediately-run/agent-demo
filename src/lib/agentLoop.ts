@@ -25,6 +25,13 @@
 // the tests rather than left as a convention.
 
 import type { AgentTool } from './agentTools';
+import {
+  anySignal,
+  steerWireText,
+  INTERRUPTED_TURN_TEXT,
+  type SteerMessage,
+  type SteerSource,
+} from './steering';
 
 export type TextBlock = { type: 'text'; text: string };
 /**
@@ -151,6 +158,10 @@ export interface AgentEvents {
   onReasoningDelta?(text: string): void;
   /** R3-335: the complete reasoning block for a turn, once the turn is in. */
   onReasoning?(block: ReasoningBlock): void;
+  /** R3-333: the loop applied the user's mid-run correction(s). `interrupted` is
+   *  true when an `interrupt`-mode steer cut an in-flight model turn short (as
+   *  opposed to being applied at an ordinary turn boundary). */
+  onSteer?(info: { messages: SteerMessage[]; interrupted: boolean }): void;
 }
 
 export interface RunAgentOptions {
@@ -194,6 +205,13 @@ export interface RunAgentOptions {
    *  request and stops billing) — not merely the between-turn loop. The transcript so
    *  far is returned; an abort is a clean stop, never a thrown error. */
   signal?: AbortSignal;
+  /** R3-333: the mid-run steering queue. The loop drains it at every turn boundary
+   *  and folds each correction in as a `user` message, so the human can redirect a
+   *  run without restarting it and paying for the transcript again. Its `interrupt`
+   *  signal aborts the in-flight MODEL turn only — never a tool batch, which must
+   *  keep every `tool_use` paired with a `tool_result`. Absent ⇒ the loop behaves
+   *  exactly as before. */
+  steering?: SteerSource;
   events?: AgentEvents;
 }
 
@@ -386,7 +404,7 @@ const TRUNCATED_RETRY_TEXT =
  * accounts tokens and compacts automatically so it can run long.
  */
 export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
-  const { client, tools, execute, system, prompt, events, signal } = opts;
+  const { client, tools, execute, system, prompt, events, signal, steering } = opts;
   const maxTurns = opts.maxTurns ?? 100;
   const maxNudges = opts.maxNudges ?? 1;
   const maxTruncationRetries = opts.maxTruncationRetries ?? 2;
@@ -404,6 +422,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   // *episode*, not per run.
   let nudges = 0;
   let truncationRetries = 0;
+  // True when the previous iteration's model turn was cut short by an `interrupt`
+  // steer, so the injected correction can be reported as an interruption.
+  let interruptedLastTurn = false;
   // Running context size (provider-reported when available) + cumulative spend.
   let contextTokens = 0;
   let spentTokens = 0;
@@ -417,6 +438,24 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     // per-request `signal` below (which aborts the in-flight upstream turn), this
     // halts "the loop between tool calls AND aborts the in-flight LLM request".
     if (signal?.aborted) break;
+
+    // R3-333: apply any queued corrections at the TURN BOUNDARY, before the next
+    // request, so the model's very next turn reflects them. Draining here (rather
+    // than at the point of arrival) is what makes a steer safe: whatever the loop
+    // was doing — streaming a turn, running a tool batch — has finished.
+    if (steering) {
+      const steers = steering.drain();
+      if (steers.length) {
+        messages.push({
+          role: 'user',
+          content: steers.map((m) => ({ type: 'text' as const, text: steerWireText(m) })),
+        });
+        events?.onSteer?.({ messages: steers, interrupted: interruptedLastTurn });
+      }
+      interruptedLastTurn = false;
+      steering.rearm();
+    }
+
     // Compact BEFORE the next request when the running context is near the window.
     if (shouldCompact(contextTokens, window, reserveTokens)) {
       const { messages: compacted, summarizedCount } = await compactTranscript(
@@ -435,14 +474,29 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       }
     }
 
+    // The in-flight turn is abortable by EITHER verb: STOP (ends the run) or an
+    // `interrupt`-mode STEER (ends the turn, keeps the run). They are composed into
+    // one per-turn signal, and told apart in the catch by asking which fired.
+    const turnAbort = anySignal([signal, steering?.interrupt]);
+    // Capture what the model had streamed when a steer cut in, so the interrupted
+    // turn is recorded as what actually happened rather than dropped.
+    let partialText = '';
+    const onTextDelta = (text: string): void => {
+      partialText += text;
+      events?.onAssistantDelta?.(text);
+    };
     const sendTurn = () =>
       client.createMessage({
         system,
         messages,
         tools,
-        onTextDelta: events?.onAssistantDelta,
+        // R3-333's local `onTextDelta` (it captures the partial text a steer may cut
+        // short) — NOT `events.onAssistantDelta` directly.
+        onTextDelta,
+        // R3-335's reasoning stream rides alongside it.
         onReasoningDelta: events?.onReasoningDelta,
-        signal,
+        // R3-333: STOP composed with the steer INTERRUPT, so either verb ends the turn.
+        signal: turnAbort.signal,
       });
     let res: ModelResponse;
     try {
@@ -452,7 +506,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         // Recover-then-retry on a hard context-overflow (exit-c): compact once and
         // re-send. If there is nothing to compact, or the retry also overflows, the
         // error propagates — a bounded recovery, never a dead loop.
-        if (signal?.aborted || !isContextOverflow(e)) throw e;
+        if (turnAbort.signal.aborted || !isContextOverflow(e)) throw e;
         const { messages: compacted, summarizedCount } = await compactTranscript(messages, client, keepRecentTurns);
         if (summarizedCount === 0) throw e;
         messages = compacted;
@@ -467,9 +521,28 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     } catch (e) {
       // R3-224: a mid-turn abort surfaces as a thrown (Abort/Stream)Error. Treat it
       // as a CLEAN stop — return the transcript so far — not a failure to bubble up.
-      if (signal?.aborted) break;
+      if (signal?.aborted) {
+        turnAbort.dispose();
+        break;
+      }
+      // R3-333: the SAME thrown abort, but from a steer — the run continues. Record
+      // the turn the user cut short (an assistant message, so the transcript keeps
+      // strict role alternation and replay shows the interruption where it happened),
+      // then loop: the drain at the top of the next iteration injects the correction.
+      if (steering?.interrupt.aborted) {
+        turnAbort.dispose();
+        messages.push({
+          role: 'assistant',
+          content: [{ type: 'text', text: partialText.trim() || INTERRUPTED_TURN_TEXT }],
+        });
+        events?.onAssistantText?.(partialText.trim() || INTERRUPTED_TURN_TEXT);
+        interruptedLastTurn = true;
+        continue;
+      }
+      turnAbort.dispose();
       throw e;
     }
+    turnAbort.dispose();
 
     // Token accounting (R3-220): prefer the provider `usage`, else estimate. `turnCost`
     // is what this turn billed (input + output); `contextTokens` is the current window
@@ -536,6 +609,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         messages.push({ role: 'user', content: [{ type: 'text', text: NUDGE_TEXT }] });
         continue;
       }
+      // R3-333 follow-up: the model is done, but the user queued something while it
+      // was working. Continue rather than end — the drain at the top of the next
+      // iteration turns the queued message into the next turn's prompt. This is the
+      // difference between a follow-up and a restart.
+      if (steering?.hasPending()) continue;
       break;
     }
 

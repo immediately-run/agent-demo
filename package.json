@@ -28,15 +28,17 @@
         "hosts": [
           "https://example.com"
         ]
-      }
+      },
+      "vcs:read": {}
     }
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "vitest run",
-    "preview": "vite preview"
+    "test": "node scripts/gen-sdk-skill.mjs --check && vitest run",
+    "preview": "vite preview",
+    "gen:sdk-skill": "node scripts/gen-sdk-skill.mjs"
   },
   "dependencies": {
     "@immediately-run/sdk": "^0.48.0",
