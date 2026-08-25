@@ -12,7 +12,7 @@
 // surfacing a raw `EROFS` to the model.
 
 import fs from 'fs';
-import type { ToolExecutor } from './agentLoop';
+import type { ImageBlock, ToolExecutor, ToolOutcome } from './agentLoop';
 import type { Toolset } from './toolset';
 
 /** The slice of `fs.promises` these tools use — narrowed so tests can inject an
@@ -110,12 +110,55 @@ export interface FsToolsOptions {
   fs?: FsPortLike;
   /** When the mount is `ro`, writes/deletes are refused locally (no raw EROFS). */
   readOnly?: boolean;
+  /**
+   * Does the resolved model accept images (R3-339)? From
+   * `describeChat().features.vision`. When false, `read_file` on an image SAYS SO in the
+   * tool result rather than sending something that errors upstream — absent rather than
+   * fake, like the rest of the toolset. Defaults to false: a caller that does not know
+   * must not gamble the user's request on a guess.
+   */
+  vision?: boolean;
 }
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = ToolOutcome;
 
 // Caps that keep a single tool result from blowing the model's context.
 const READ_CAP = 64 * 1024; // bytes of a file returned by read_file
+// R3-339 — the largest image `read_file` will hand the model. Images are big and count
+// against the context budget R3-220 manages, so there has to be a ceiling, and it has to
+// be NAMED in the refusal rather than silently truncating (a truncated image is not a
+// smaller image, it is a corrupt one). ~1.5 MB of source bytes ≈ 2 MB of base64, which
+// comfortably covers a screenshot or a design mockup.
+const IMAGE_CAP = 1_500 * 1024;
+/**
+ * Image types the transport can carry, mirroring the SDK's `mimeTypeFor` table.
+ *
+ * WHY A LOCAL COPY rather than importing `mimeTypeFor` from `@immediately-run/sdk`:
+ * this module is deliberately dependency-light so it unit-tests without a host — every
+ * suite that touches it (and `projectTools`, which shares its types) would otherwise
+ * have to mock the whole SDK barrel to exercise a path lookup. Eleven lines of table is
+ * the cheaper honesty. `mimeTypeFor` is the source it mirrors; `imageMime.test.ts`
+ * pins the agreement.
+ *
+ * `.svg` is deliberately ABSENT even though the SDK's table names it — see `read_file`.
+ */
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+};
+
+/** The image MIME type for a path, or `undefined` when it is not a viewable image. */
+export function imageMimeFor(path: string): string | undefined {
+  const dot = path.lastIndexOf('.');
+  if (dot === -1) return undefined;
+  return IMAGE_MIME_BY_EXT[path.slice(dot + 1).toLowerCase()];
+}
 const LIST_CAP = 1000; // entries from list_dir
 const MATCH_CAP = 200; // glob paths / grep hits
 const WALK_CAP = 5000; // files visited by a glob/grep walk
@@ -144,6 +187,32 @@ export function resolveWithin(root: string, rel: string): string | null {
   const joined = normalizePosix(`${base}/${rel}`);
   if (joined !== base && !joined.startsWith(`${base}/`)) return null;
   return joined;
+}
+
+/** Name a non-viewable binary by its extension, so the refusal says WHAT it is rather
+ *  than just "unreadable" — the model can then decide whether it even needed it. */
+function describeBinary(path: string): string {
+  const dot = path.lastIndexOf('.');
+  const ext = dot === -1 ? '' : path.slice(dot + 1).toLowerCase();
+  return ext ? `a .${ext} file` : 'no file extension';
+}
+
+/** base64 without Node's Buffer — the sandbox has `btoa`, not Buffer. Chunked so a
+ *  megabyte-scale image does not blow the argument limit of `String.fromCharCode`. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** Did a UTF-8 read fail because the bytes are not text? ZenFS/node surface this as a
+ *  TypeError from the decoder rather than an errno, so it needs its own recognition. */
+function isDecodeError(e: unknown): boolean {
+  const msg = ((e as Error)?.message ?? String(e)).toLowerCase();
+  return /utf-?8|decode|invalid.*byte|malformed/.test(msg);
 }
 
 const code = (e: unknown): string | undefined => (e as { code?: string })?.code;
@@ -279,6 +348,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const root = normalizePosix(opts.root);
   const p: FsPortLike = opts.fs ?? (fs.promises as unknown as FsPortLike);
   const readOnly = opts.readOnly ?? false;
+  const vision = opts.vision ?? false;
 
   const rel = (abs: string): string => {
     const r = abs === root ? '' : abs.slice(root.length + 1);
@@ -320,8 +390,41 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
 
   const handlers: Record<string, (input: Record<string, unknown>) => Promise<ToolResult>> = {
     async read_file(input) {
-      const abs = resolveWithin(root, String(input.path ?? ''));
+      const relPath = String(input.path ?? '');
+      const abs = resolveWithin(root, relPath);
       if (!abs) return notFound;
+
+      // R3-339 — an IMAGE is read as bytes and handed over as an image part, not
+      // mangled through UTF-8 and not silently skipped. `.svg` is deliberately excluded
+      // from IMAGE_MIME even though the SDK's table names it: an SVG is TEXT, and it is
+      // also source the agent may want to EDIT, so it reads as text and stays editable.
+      // Making that predictable is the point — the surprise would be the failure.
+      const mime = imageMimeFor(relPath);
+      if (mime) {
+        if (!vision) {
+          return {
+            content: `${rel(abs)} is a ${mime} image, but the model in use cannot accept images — describe it in words or work from the file's name and the code that references it.`,
+            isError: true,
+          };
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = await p.readFile(abs);
+        } catch (e) {
+          return fsError(e);
+        }
+        if (bytes.length > IMAGE_CAP) {
+          // Refused BEFORE it is sent, and the cap is named. Truncating an image does
+          // not make a smaller image, it makes a corrupt one.
+          return {
+            content: `${rel(abs)} is ${bytes.length} bytes, over the ${IMAGE_CAP}-byte image limit — resize or crop it first.`,
+            isError: true,
+          };
+        }
+        const image: ImageBlock = { type: 'image', mimeType: mime, data: toBase64(bytes) };
+        return { content: `[image ${rel(abs)} — ${mime}, ${bytes.length} bytes]`, images: [image] };
+      }
+
       const offsetGiven = input.offset !== undefined && input.offset !== null;
       const limitGiven = input.limit !== undefined && input.limit !== null;
       try {
@@ -386,6 +489,14 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
         }
         return { content: body };
       } catch (e) {
+        // R3-339 — a non-image binary is still refused, but by NAME rather than as a
+        // bare decode failure: "unreadable" tells the model nothing it can act on.
+        if (isDecodeError(e)) {
+          return {
+            content: `${rel(abs)} is not UTF-8 text and is not an image type the model can view (${describeBinary(relPath)}) — read_file cannot show it.`,
+            isError: true,
+          };
+        }
         return fsError(e);
       }
     },
@@ -658,7 +769,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const str = (description: string) => ({ type: 'string', description });
 
   const tools: Toolset['tools'] = [
-    { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
+    { name: 'read_file', description: 'Read a workspace file. An IMAGE (png/jpeg/gif/webp/avif/bmp/ico) comes back as a picture you can look at, when the model in use accepts images; an `.svg` reads as text, because it is source you may want to edit. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
     { name: 'write_file', description: 'Create or **overwrite** a whole workspace file (parent dirs are created). Use for NEW files or full rewrites. To change part of an EXISTING file, prefer `edit_file` — do not regenerate a large file just to add a few lines. Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
     { name: 'edit_file', description: 'Make surgical edits to an existing file by replacing exact snippets — the right tool for changing or adding lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition. **To change several places in one file, pass `edits` and do it in ONE call** — every entry is matched against the file as it is now, overlapping entries are refused, and if any entry fails NOTHING is applied.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique. Omit when using `edits`.'), new_string: str('Replacement text, inserted verbatim. Omit when using `edits`.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' }, edits: { type: 'array', description: 'Several replacements applied in one call, each matched against the ORIGINAL file (not against each other). All-or-nothing.', items: obj({ old_string: str('Exact text to replace; unique unless replace_all is set on this entry.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence of THIS entry (default false).' } }) } }) },
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },

@@ -59,13 +59,18 @@ export default function ConversationStage() {
   // Tools given to the model. Without the stage tree the agent gets the catalog ONLY —
   // no filesystem tools — so it can never edit the wrong (its own) repo. Run is gated
   // below and a "workspace not ready" notice is shown.
+  // R3-339 — does the model the user configured accept images? The tool is told, so a
+  // `read_file` on a PNG can SAY the model cannot look at it instead of sending
+  // something that errors upstream. Re-read when the provider changes.
+  const vision = useMemo(() => describeChat()?.features.vision === true, []);
+
   const toolset = useMemo(() => {
     if (!stageTree) return catalogToolset(catalog);
-    const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
+    const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly, vision });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
-  }, [catalog, stageTree]);
+  }, [catalog, stageTree, vision]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
@@ -330,6 +335,13 @@ export default function ConversationStage() {
               <span className="ca-compaction" title={e.summary}>
                 ⚑ compacted earlier turns to stay within the context window
               </span>
+            )}
+            {e.kind === "image" && (
+              <img
+                className="ca-image"
+                src={`data:${e.mimeType};base64,${e.data}`}
+                alt="Image the agent read from the workspace"
+              />
             )}
           </li>
         ))}

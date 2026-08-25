@@ -19,9 +19,18 @@
 import type { AgentTool } from './agentTools';
 
 export type TextBlock = { type: 'text'; text: string };
+/**
+ * An image the model can look at (R3-339). `data` is base64 with no `data:` prefix,
+ * matching the SDK `ContentPart` the transport already accepts.
+ *
+ * Carried as its OWN block rather than stuffed inside a `tool_result`, because a tool
+ * result's content is a string on the wire — the loop appends the image to the same
+ * user message that carries the results, which is the shape both host adapters map.
+ */
+export type ImageBlock = { type: 'image'; mimeType: string; data: string };
 export type ToolUseBlock = { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> };
 export type ToolResultBlock = { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock;
 
 export type Role = 'user' | 'assistant';
 export interface ChatMessage {
@@ -68,7 +77,15 @@ export interface ModelClient {
 export type ToolExecutor = (
   name: string,
   input: Record<string, unknown>,
-) => Promise<{ content: string; isError?: boolean }>;
+) => Promise<ToolOutcome>;
+
+/** What one tool call produced. `images` (R3-339) is how a tool hands the model
+ *  something to LOOK at; `content` still carries the text the model reads. */
+export interface ToolOutcome {
+  content: string;
+  isError?: boolean;
+  images?: ImageBlock[];
+}
 
 /** Why a no-tool-call turn looked like a stall rather than a genuine finish. */
 export type StallReason = 'empty' | 'announced-no-call';
@@ -80,7 +97,7 @@ export interface AgentEvents {
   /** The complete assistant text for a turn, once the turn is in. */
   onAssistantText?(text: string): void;
   onToolUse?(name: string, input: Record<string, unknown>): void;
-  onToolResult?(name: string, result: { content: string; isError?: boolean }): void;
+  onToolResult?(name: string, result: ToolOutcome): void;
   /** Fired when the loop nudges a STALLED turn (the model ended without a tool
    *  call despite empty or "I'll do X" intent text) back into action, so a panel
    *  can show "nudging the model to continue" rather than a silent stall. */
@@ -200,6 +217,11 @@ export function estimateTokens(messages: ChatMessage[]): number {
       if (b.type === 'text') chars += b.text.length;
       else if (b.type === 'tool_use') chars += JSON.stringify(b.input).length + b.name.length;
       else if (b.type === 'tool_result') chars += b.content.length;
+      // R3-339: an image is large and MUST be accounted for, or it escapes exactly the
+      // budget the accounting exists to enforce. base64 is ~4/3 of the bytes, and the
+      // provider bills tokens per pixel area — the base64 length is the honest local
+      // proxy for "this is big", and over-counting is the safe direction.
+      else if (b.type === 'image') chars += b.data.length;
     }
   }
   return Math.ceil(chars / 4);
@@ -257,7 +279,15 @@ export async function compactTranscript(
   if (tailStart <= 0) return { messages, summarizedCount: 0 };
 
   const head = messages.slice(0, tailStart);
-  const tail = messages.slice(tailStart);
+  // R3-339 — compaction DROPS image parts from the kept tail, by an explicit rule.
+  //
+  // An image is the largest and least summarisable thing in a transcript, and the
+  // summary the head is folded into is TEXT — an image the compactor does not
+  // understand is exactly the kind of thing that corrupts a transcript quietly. The
+  // tool_result that named it stays, so the model still knows it looked at
+  // `assets/mock.png` and what it concluded; it simply cannot look again without
+  // re-reading the file, which it can do.
+  const tail = messages.map(dropImages).slice(tailStart);
 
   // Ask the model to summarize the head. Append the instruction to the final head
   // message when it is a `user` turn (avoids introducing consecutive user turns).
@@ -284,6 +314,15 @@ export async function compactTranscript(
     content: [{ type: 'text', text: COMPACTION_MARKER + summaryText }],
   };
   return { messages: [summaryMsg, ...tail], summarizedCount: head.length };
+}
+
+/** Strip image blocks from a message, keeping everything else in order. A message left
+ *  with nothing keeps a single empty text block, so the role sequence stays well-formed
+ *  (a content-less message is rejected by most providers). */
+function dropImages(m: ChatMessage): ChatMessage {
+  if (!m.content.some((b) => b.type === 'image')) return m;
+  const kept = m.content.filter((b) => b.type !== 'image');
+  return { role: m.role, content: kept.length ? kept : [{ type: 'text', text: '' }] };
 }
 
 /** Does this thrown error look like a hard context-window overflow? Used to trigger
@@ -434,9 +473,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     nudges = 0; // a productive turn clears the stall budget
 
     const results: ToolResultBlock[] = [];
+    // R3-339 — image parts produced by tools this turn. They ride in the SAME user
+    // message as the results (after them), because a `tool_result`'s content is a string
+    // on the wire; this is the shape both host adapters map to their provider.
+    const images: ImageBlock[] = [];
     for (const call of toolUses) {
       events?.onToolUse?.(call.name, call.input);
-      let outcome: { content: string; isError?: boolean };
+      let outcome: ToolOutcome;
       try {
         outcome = await execute(call.name, call.input);
       } catch (e) {
@@ -453,8 +496,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         content: outcome.content,
         is_error: outcome.isError,
       });
+      if (outcome.images?.length) images.push(...outcome.images);
     }
-    messages.push({ role: 'user', content: results });
+    messages.push({ role: 'user', content: [...results, ...images] });
 
     // Runaway-cost guard: stop once cumulative spend passes the budget (the token/
     // spend bound that replaces the old raw turn cap). Compaction keeps a single

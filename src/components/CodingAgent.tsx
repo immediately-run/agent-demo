@@ -64,13 +64,18 @@ export default function CodingAgent() {
   // tree. When a stage app's tree is conferred (`type:'worktree'`, AA-23) author THAT;
   // otherwise (standalone agent) fall back to this app's own repo. Re-derived when the
   // conferred mount or its writability changes.
+  // R3-339 — does the model the user configured accept images? The tool is told, so a
+  // `read_file` on a PNG can SAY the model cannot look at it instead of sending
+  // something that errors upstream. Re-read when the provider changes.
+  const vision = useMemo(() => describeChat()?.features.vision === true, []);
+
   const toolset = useMemo(() => {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
-    const fsTools = createFsToolset({ root, readOnly });
+    const fsTools = createFsToolset({ root, readOnly, vision });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
-  }, [catalog, mounts]);
+  }, [catalog, mounts, vision]);
 
   // The workspace root the fs tools are chrooted to — env grounding for the prompt.
   const workspaceRoot = useMemo(
@@ -192,6 +197,13 @@ export default function CodingAgent() {
               <span className="ca-compaction" title={e.summary}>
                 ⚑ compacted earlier turns to stay within the context window
               </span>
+            )}
+            {e.kind === "image" && (
+              <img
+                className="ca-image"
+                src={`data:${e.mimeType};base64,${e.data}`}
+                alt="Image the agent read from the workspace"
+              />
             )}
           </li>
         ))}

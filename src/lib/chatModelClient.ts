@@ -25,9 +25,12 @@ function toChatMessages(system: string | undefined, messages: ChatMessage[]): Ch
   const out: ChatReqMessage[] = [];
   if (system) out.push({ role: 'system', content: [{ type: 'text', text: system }] });
   for (const m of messages) {
-    const content: ContentPart[] = m.content.map((b) => {
+    const content: ContentPart[] = m.content.map((b): ContentPart => {
       if (b.type === 'text') return { type: 'text', text: b.text };
       if (b.type === 'tool_use') return { type: 'tool-use', id: b.id, name: b.name, input: b.input };
+      // R3-339 — an image the model should LOOK at. The transport already accepts it
+      // (`features.vision`); the loop just never produced one until now.
+      if (b.type === 'image') return { type: 'image', mimeType: b.mimeType, data: b.data };
       return {
         type: 'tool-result',
         toolCallId: b.tool_use_id,
