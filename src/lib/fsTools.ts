@@ -157,6 +157,98 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
+/** One requested replacement. `replace_all` applies per ENTRY, so a batch can mix a
+ *  unique-anchor edit with a fan-out rename. */
+export interface EditSpec {
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+}
+
+/** Where one entry matched, resolved against the ORIGINAL text. */
+interface EditSpan {
+  start: number;
+  end: number;
+  replacement: string;
+  /** 1-indexed entry number, for error messages the model can act on. */
+  entry: number;
+}
+
+/** All non-overlapping occurrences of `needle` in `haystack` (same counting as
+ *  `split(needle)`, so a self-overlapping literal like `aa` in `aaa` matches once). */
+function occurrences(haystack: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) {
+    out.push(i);
+  }
+  return out;
+}
+
+/**
+ * Plan a batch of edits against the file AS READ (R3-337).
+ *
+ * Every entry is matched against the ORIGINAL text, never against the result of the
+ * previous entry — otherwise the outcome would be order-dependent and hard for a model
+ * to reason about. The plan is then all-or-nothing: any failure returns an error naming
+ * WHICH entry and why, and nothing is written, because a half-applied batch leaves the
+ * file in a state the model did not intend and cannot easily diagnose.
+ *
+ * Overlaps are REFUSED rather than resolved. Two entries whose spans intersect are a
+ * mistake in the request, and silently picking one is exactly the near-invisible wrong
+ * result this tool exists to reduce.
+ */
+export function planEdits(text: string, edits: EditSpec[]): { ok: true; text: string; sites: number } | { ok: false; error: string } {
+  const spans: EditSpan[] = [];
+  for (let i = 0; i < edits.length; i++) {
+    const entry = i + 1;
+    const { old_string: oldStr, new_string: newStr } = edits[i];
+    if (typeof oldStr !== 'string' || oldStr === '') {
+      return { ok: false, error: `edit ${entry}: "old_string" must be a non-empty string` };
+    }
+    if (typeof newStr !== 'string') {
+      return { ok: false, error: `edit ${entry}: "new_string" must be a string` };
+    }
+    if (oldStr === newStr) {
+      return { ok: false, error: `edit ${entry}: "old_string" and "new_string" are identical — nothing to do` };
+    }
+    const at = occurrences(text, oldStr);
+    if (at.length === 0) {
+      return { ok: false, error: `edit ${entry}: old_string not found — it must match the file exactly (whitespace included). No edits were applied.` };
+    }
+    if (at.length > 1 && edits[i].replace_all !== true) {
+      return {
+        ok: false,
+        error: `edit ${entry}: old_string is not unique (${at.length} matches) — add surrounding context to make it unique, or set replace_all on this entry. No edits were applied.`,
+      };
+    }
+    for (const start of at) spans.push({ start, end: start + oldStr.length, replacement: newStr, entry });
+  }
+  if (spans.length === 0) return { ok: false, error: 'no edits supplied' };
+
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 1; i < spans.length; i++) {
+    if (spans[i].start < spans[i - 1].end) {
+      const [a, b] = [spans[i - 1].entry, spans[i].entry];
+      return {
+        ok: false,
+        error:
+          a === b
+            ? `edit ${a} overlaps itself at offset ${spans[i].start} — no edits were applied`
+            : `edits ${a} and ${b} overlap at offset ${spans[i].start} — they cannot both apply. Rewrite them as one edit. No edits were applied.`,
+      };
+    }
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const span of spans) {
+    out += text.slice(cursor, span.start) + span.replacement;
+    cursor = span.end;
+  }
+  out += text.slice(cursor);
+  return { ok: true, text: out, sites: spans.length };
+}
+
 /**
  * Build the filesystem {@link Toolset} chrooted to `opts.root`. The returned
  * `tools` are handed to the model; `execute` runs them through the host `fs`.
@@ -291,39 +383,57 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
       const abs = resolveWithin(root, String(input.path ?? ''));
       if (!abs) return notFound;
-      const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
-      const newStr = typeof input.new_string === 'string' ? input.new_string : '';
-      if (!oldStr) return { content: 'edit_file requires a non-empty "old_string"', isError: true };
-      if (oldStr === newStr) return { content: '"old_string" and "new_string" are identical — nothing to do', isError: true };
-      const replaceAll = input.replace_all === true;
+      // R3-337 — one call, N sites. `edits[]` is the batch form; the single
+      // `old_string`/`new_string` pair is kept because it is the right shape for a
+      // one-site change and the prompt already teaches it. Both go through the same
+      // planner, so the batch of one and the single pair cannot diverge.
+      const batch = Array.isArray(input.edits) ? (input.edits as unknown[]) : null;
+      const specs: EditSpec[] = batch
+        ? batch.map((e) => {
+            const o = (e ?? {}) as Record<string, unknown>;
+            return {
+              old_string: typeof o.old_string === 'string' ? o.old_string : '',
+              new_string: typeof o.new_string === 'string' ? o.new_string : '',
+              replace_all: o.replace_all === true,
+            };
+          })
+        : [
+            {
+              old_string: typeof input.old_string === 'string' ? input.old_string : '',
+              new_string: typeof input.new_string === 'string' ? input.new_string : '',
+              replace_all: input.replace_all === true,
+            },
+          ];
+      if (batch && specs.length === 0) {
+        return { content: 'edit_file "edits" was empty — supply at least one { old_string, new_string }', isError: true };
+      }
+      if (!batch && !specs[0].old_string) {
+        return { content: 'edit_file requires a non-empty "old_string" (or an "edits" array)', isError: true };
+      }
       let text: string;
       try {
         text = await p.readFile(abs, 'utf8');
       } catch (e) {
         return fsError(e);
       }
-      // Count via split (no regex — `old_string` is a literal, and a `$`/`\` in
-      // `new_string` must NOT be reinterpreted the way String.replace would).
-      const count = text.split(oldStr).length - 1;
-      if (count === 0) return { content: 'old_string not found — it must match the file exactly (whitespace included)', isError: true };
-      if (count > 1 && !replaceAll) {
-        return { content: `old_string is not unique (${count} matches) — add surrounding context to make it unique, or pass replace_all: true`, isError: true };
-      }
-      let next: string;
-      if (replaceAll) {
-        next = text.split(oldStr).join(newStr);
-      } else {
-        const at = text.indexOf(oldStr);
-        next = text.slice(0, at) + newStr + text.slice(at + oldStr.length);
+      // Literal matching throughout — never a regex — so a `$`/backslash in
+      // `new_string` is not reinterpreted the way String.replace would.
+      const plan = planEdits(text, specs);
+      if (!plan.ok) {
+        // All-or-nothing: nothing has been written, and the message names the entry.
+        // The single-pair form has no entry to number, so its message reads as it always
+        // did. A one-entry BATCH still numbers, because the caller wrote `edits[0]`.
+        return { content: batch ? plan.error : plan.error.replace(/^edit 1: /, ''), isError: true };
       }
       try {
-        await p.writeFile(abs, next);
+        await p.writeFile(abs, plan.text);
       } catch (e) {
         return fsError(e);
       }
-      const delta = next.length - text.length;
-      const where = replaceAll ? `${count} replacements` : '1 replacement';
-      return { content: `edited ${rel(abs)} (${where}, ${delta >= 0 ? '+' : ''}${delta} bytes)` };
+      const delta = plan.text.length - text.length;
+      const where = plan.sites === 1 ? '1 replacement' : `${plan.sites} replacements`;
+      const across = specs.length > 1 ? ` across ${specs.length} edits` : '';
+      return { content: `edited ${rel(abs)} (${where}${across}, ${delta >= 0 ? '+' : ''}${delta} bytes)` };
     },
 
     async list_dir(input) {
@@ -421,7 +531,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const tools: Toolset['tools'] = [
     { name: 'read_file', description: 'Read a UTF-8 text file from the workspace. `path` is workspace-relative. For a large file, page through it with `offset` (1-indexed start line) and `limit` (line count): when a read is cut short the result names the exact `offset=` to continue from, so keep reading until you have the whole file.', input_schema: obj({ path: str('Workspace-relative file path.'), offset: { type: 'integer', description: '1-indexed line to start reading from (default 1).' }, limit: { type: 'integer', description: 'Number of lines to read from `offset` (default: to end of file, still capped per window — the notice names the next offset).' } }) },
     { name: 'write_file', description: 'Create or **overwrite** a whole workspace file (parent dirs are created). Use for NEW files or full rewrites. To change part of an EXISTING file, prefer `edit_file` — do not regenerate a large file just to add a few lines. Edits trigger the app rebuild/HMR.', input_schema: obj({ path: str('Workspace-relative file path.'), content: str('Full new file contents.') }) },
-    { name: 'edit_file', description: 'Make a surgical edit to an existing file by replacing an exact snippet — the right tool for changing or adding a few lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' } }) },
+    { name: 'edit_file', description: 'Make surgical edits to an existing file by replacing exact snippets — the right tool for changing or adding lines in a large file (no whole-file rewrite). `old_string` must match the file EXACTLY, whitespace included, and be unique unless `replace_all` is set; `new_string` replaces it (inserted verbatim — `$`/backslashes are not special). To insert, set `old_string` to a unique nearby anchor and `new_string` to that anchor plus your addition. **To change several places in one file, pass `edits` and do it in ONE call** — every entry is matched against the file as it is now, overlapping entries are refused, and if any entry fails NOTHING is applied.', input_schema: obj({ path: str('Workspace-relative file path.'), old_string: str('Exact text to replace; include enough surrounding context to be unique. Omit when using `edits`.'), new_string: str('Replacement text, inserted verbatim. Omit when using `edits`.'), replace_all: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match (default false).' }, edits: { type: 'array', description: 'Several replacements applied in one call, each matched against the ORIGINAL file (not against each other). All-or-nothing.', items: obj({ old_string: str('Exact text to replace; unique unless replace_all is set on this entry.'), new_string: str('Replacement text, inserted verbatim.'), replace_all: { type: 'boolean', description: 'Replace every occurrence of THIS entry (default false).' } }) } }) },
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },
     { name: 'stat', description: 'Stat a workspace path: returns its type, size, and mtime.', input_schema: obj({ path: str('Workspace-relative path.') }) },
     { name: 'glob', description: 'Find workspace files matching a glob (`**`, `*`, `?`), e.g. "src/**/*.ts".', input_schema: obj({ pattern: str('Glob pattern, workspace-relative.') }) },
