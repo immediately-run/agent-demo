@@ -18,9 +18,12 @@ import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
+import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
+import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
+import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
@@ -36,6 +39,12 @@ export default function ConversationStage() {
   // R3-224 (§3.3): the stop button's abort controller for the in-flight run. Aborting
   // it halts the loop AND tears down the in-flight upstream LLM request (stops billing).
   const abortRef = useRef<AbortController | null>(null);
+  // R3-333: the mid-run steering queue. STOP (above) ends the run; STEER redirects it
+  // without discarding the transcript. One controller per run, so a correction the
+  // user took back never leaks into the next one.
+  const steerRef = useRef<SteerController | null>(null);
+  const [queued, setQueued] = useState<readonly SteerMessage[]>([]);
+  const [steerText, setSteerText] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState("");
@@ -62,12 +71,20 @@ export default function ConversationStage() {
   // Tools given to the model. Without the stage tree the agent gets the catalog ONLY —
   // no filesystem tools — so it can never edit the wrong (its own) repo. Run is gated
   // below and a "workspace not ready" notice is shown.
-  const toolset = useMemo(() => {
-    if (!stageTree) return catalogToolset(catalog);
+  const { toolset, skills } = useMemo(() => {
+    // No conferred stage tree ⇒ a catalog-only toolset with no authoring tools, so
+    // `withSkills` offers nothing and `load_skill` is absent — the authoring skills
+    // would be advice the agent cannot act on (R3-331).
+    if (!stageTree) return withSkills(catalogToolset(catalog));
     const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
+    // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
+    // the model) unless the app holds `vcs:read`.
+    const gitTools = createGitToolset({ catalog });
+    // `withSkills` stays LAST (R3-331): which host skills are offered depends on the
+    // final merged tool list, so it has to see the git tools too.
+    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools, gitTools));
   }, [catalog, stageTree]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
@@ -177,16 +194,22 @@ export default function ConversationStage() {
     append({ kind: "user", text: kickoff });
     const controller = new AbortController();
     abortRef.current = controller;
+    const steering = new SteerController();
+    steerRef.current = steering;
+    setQueued([]);
+    const offSteerChange = steering.onChange((pending) => setQueued([...pending]));
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot: stageTree?.root, today: todayIso() }),
+        system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot: stageTree?.root, today: todayIso() }),
         history,
         prompt: kickoff,
         // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
         signal: controller.signal,
+        // R3-333: the steering queue — the other verb the human has.
+        steering,
         // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
@@ -204,7 +227,10 @@ export default function ConversationStage() {
             );
           },
           onAssistantText: (text) => {
-            if (text.trim()) append({ kind: "text", text });
+            // A turn an `interrupt` steer cut short is its own row, live and on
+            // replay — not a reply the model actually wrote.
+            if (text === INTERRUPTED_TURN_TEXT) append({ kind: "interrupted" });
+            else if (text.trim()) append({ kind: "text", text });
             setStreaming("");
           },
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
@@ -212,6 +238,9 @@ export default function ConversationStage() {
           onNudge: () => append({ kind: "nudge" }),
           onCompact: ({ summarizedCount }) =>
             append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
+          onSteer: ({ messages }) => {
+            for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
+          },
         },
       });
       if (conv && store) {
@@ -231,6 +260,10 @@ export default function ConversationStage() {
     } catch (e) {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
     } finally {
+      offSteerChange();
+      steerRef.current = null;
+      setQueued([]);
+      setSteerText("");
       setStreaming("");
       setThinking("");
       setRunning(false);
@@ -242,6 +275,19 @@ export default function ConversationStage() {
   // in-flight LLM request (the host tears down the upstream provider fetch, stops billing).
   const stop = useCallback(() => {
     abortRef.current?.abort();
+  }, []);
+
+  // R3-333: the OTHER verb. `queue` applies at the next turn boundary (the in-flight
+  // turn finishes); `interrupt` ends the in-flight model turn now and continues with
+  // the correction. Neither ends the run — that is what Stop is for.
+  const steer = useCallback((mode: SteerMode) => {
+    const s = steerRef.current;
+    if (!s) return;
+    if (s.enqueue(steerText, mode)) setSteerText("");
+  }, [steerText]);
+
+  const cancelSteer = useCallback((id: string) => {
+    steerRef.current?.cancel(id);
   }, []);
 
   // --- R3-43 drill 2: M2 attenuated delegation, live -----------------------------
@@ -348,6 +394,14 @@ export default function ConversationStage() {
                 ⚑ compacted earlier turns to stay within the context window
               </span>
             )}
+            {e.kind === "steer" && (
+              <span className="ca-steer">
+                {e.mode === "interrupt" ? "⟂ interrupted and steered:" : "↳ steered:"} {e.text}
+              </span>
+            )}
+            {e.kind === "interrupted" && (
+              <span className="ca-interrupted">⟂ turn interrupted by you</span>
+            )}
             {e.kind === "reasoning" && (
               <details className="ca-reasoning">
                 <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
@@ -373,17 +427,70 @@ export default function ConversationStage() {
         )}
       </ul>
 
+      {/* R3-333: what is waiting to be applied, and a way to take it back. A queued
+          follow-up the user cannot see or cancel is worse than no queue at all. */}
+      {queued.length > 0 && (
+        <ul className="ca-queued" aria-label="Queued corrections">
+          {queued.map((m) => (
+            <li key={m.id} className="ca-queued-item">
+              <span className="ca-queued-mode">{m.mode === "interrupt" ? "now" : "next step"}</span>
+              <span className="ca-queued-text">{m.text}</span>
+              <button
+                type="button"
+                className="ca-queued-cancel"
+                aria-label={`Cancel queued correction: ${m.text}`}
+                onClick={() => cancelSteer(m.id)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* One row, two modes. Not running: type a prompt and Run. Running: the same
+          field STEERS — "Next step" queues for the turn boundary, "Now" interrupts
+          the in-flight turn — and Stop still ends the run. The three verbs stay
+          visibly distinct (exit 3) and wrap on a phone (value 8). */}
       <div className="ca-prompt-row">
         <input
           className="ca-prompt"
-          placeholder="Ask the agent to read, search, or edit your app…"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={
+            running
+              ? "Steer the agent — say what to do differently…"
+              : "Ask the agent to read, search, or edit your app…"
+          }
+          value={running ? steerText : prompt}
+          onChange={(e) => (running ? setSteerText(e.target.value) : setPrompt(e.target.value))}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void run();
+            if (e.key !== "Enter") return;
+            if (running) steer("queue");
+            else void run();
           }}
-          aria-label="Prompt"
+          aria-label={running ? "Steer the agent" : "Prompt"}
         />
+        {running && (
+          <>
+            <button
+              type="button"
+              className="ca-steer-btn"
+              disabled={!steerText.trim()}
+              title="Apply this at the next step — the current one finishes first"
+              onClick={() => steer("queue")}
+            >
+              Next step
+            </button>
+            <button
+              type="button"
+              className="ca-steer-btn ca-steer-now"
+              disabled={!steerText.trim()}
+              title="Interrupt the turn in flight and apply this — the run continues"
+              onClick={() => steer("interrupt")}
+            >
+              Now
+            </button>
+          </>
+        )}
         <button
           type="button"
           className="ca-run"
@@ -392,7 +499,7 @@ export default function ConversationStage() {
           disabled={running ? false : !stageTree}
           title={
             running
-              ? "Stop the agent and abort the in-flight request"
+              ? "End the run and abort the in-flight request"
               : !stageTree
                 ? "Waiting for the app's workspace to connect"
                 : undefined

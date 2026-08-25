@@ -29,6 +29,12 @@ export interface PromptTool {
   description: string;
 }
 
+/** A host skill as the prompt advertises it — name + trigger, never the body. */
+export interface SkillSummary {
+  name: string;
+  description: string;
+}
+
 /** Everything the generated prompt needs. All fields the caller can cheaply supply;
  *  none is app-authored (host/parent-owned only), so the assembled prompt carries no
  *  untrusted instruction bytes. */
@@ -44,6 +50,11 @@ export interface PromptContext {
   /** The route/entry currently shown, if known (host/parent-owned, untainted). Route
    *  wiring is spec'd-not-yet-exposed as a simple getter; included when a caller has it. */
   route?: string;
+  /** Host-shipped skills offered to this run (R3-331): name + trigger description
+   *  ONLY. Bodies are deliberately NOT in the prompt — the model pulls one with
+   *  `load_skill` when it needs it, so the base prompt stays small against the
+   *  R3-220 context budget. Host bytes, like everything else assembled here. */
+  skills?: SkillSummary[];
 }
 
 // The host-authored immediately.run hard rules — platform invariants, NOT app bytes.
@@ -69,6 +80,8 @@ const WORKFLOW_GUIDANCE: string[] = [
   'To read a file larger than one window, page it with `read_file` `offset`/`limit` and follow the `continue with offset=` notice until you have the whole file.',
   'After editing, verify: run the typecheck/lint/format tools if they are in your tool list, and call `get_diagnostics` to confirm the app still builds; fix reported diagnostics before declaring the task done.',
   'If a tool returns `forbidden`, the app lacks that grant — do NOT retry it; explain what is missing instead.',
+  'Before you rely on remembered platform knowledge — an SDK export, a design token, how editing works — check whether a listed skill covers it and `load_skill` it. A skill is current; your recollection may not be.',
+  'Before you say a change is done — and always before proposing a contribution — read your own work back with `git_diff` if it is in your tool list. A wrong `edit_file` still builds and still typechecks; the diff is what catches it.',
   'When the task is complete, say so plainly in one line and stop.',
 ];
 
@@ -100,6 +113,17 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     ? ctx.tools.map((t) => `- ${t.name}: ${firstLine(t.description)}`).join('\n')
     : '(no tools available)';
   sections.push('Available tools:\n' + toolLines);
+
+  // (R3-331) Skill DESCRIPTIONS only — the bodies arrive via `load_skill`. The
+  // section is omitted entirely when no skill is offered, so the prompt never
+  // advertises an affordance the toolset does not carry.
+  if (ctx.skills?.length) {
+    sections.push(
+      'Available skills — reference blocks you can pull in with `load_skill` when one applies. ' +
+        'They are authoritative platform knowledge; prefer a skill over your own recollection:\n' +
+        ctx.skills.map((s) => `- ${s.name}: ${firstLine(s.description)}`).join('\n'),
+    );
+  }
 
   sections.push('How to work:\n' + WORKFLOW_GUIDANCE.map((g) => `- ${g}`).join('\n'));
 

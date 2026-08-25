@@ -467,15 +467,23 @@ describe('runAgent — the agentic tool-use loop (§3.3)', () => {
 });
 
 describe('runAgent — mid-stream abort / stop button (R3-224 §3.3)', () => {
-  it('threads the abort signal into every model turn', async () => {
-    let seenSignal: AbortSignal | undefined;
+  it('threads an abort signal into every model turn that fires when the stop signal does', async () => {
+    // Not identity: since R3-333 the per-turn signal is the STOP signal composed
+    // with the steer INTERRUPT signal, so the turn can be ended by either verb. What
+    // has to hold — and is what the stop button depends on — is propagation.
+    const ctrl = new AbortController();
+    let sawSignal = false;
+    let abortedDuringTurn: boolean | undefined;
     const client: ModelClient = {
       async createMessage(req) {
-        seenSignal = req.signal;
+        sawSignal = !!req.signal;
+        // Abort MID-TURN — the moment the stop button is what it is for — and check
+        // the signal the client is holding sees it.
+        ctrl.abort();
+        abortedDuringTurn = req.signal?.aborted;
         return { stopReason: 'end_turn', content: [{ type: 'text', text: 'ok' }] };
       },
     };
-    const ctrl = new AbortController();
     await runAgent({
       client,
       tools: TOOLS,
@@ -483,7 +491,8 @@ describe('runAgent — mid-stream abort / stop button (R3-224 §3.3)', () => {
       prompt: 'go',
       signal: ctrl.signal,
     });
-    expect(seenSignal).toBe(ctrl.signal);
+    expect(sawSignal).toBe(true);
+    expect(abortedDuringTurn).toBe(true);
   });
 
   it('stops between turns — no further model call — once the signal is aborted', async () => {
