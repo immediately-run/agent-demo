@@ -80,6 +80,7 @@ const WORKFLOW_GUIDANCE: string[] = [
   'Changing several places in ONE file is ONE `edit_file` call: pass `edits` with an entry per site. Each entry is matched against the file as it is now, so do not chain them; if any entry fails, none is applied.',
   'To rename or move a file use `move_file`, and to duplicate one use `copy_file` — never read + write + delete. To rename a symbol across files use `replace_in_files`, with `dry_run: true` first to see the blast radius.',
   'To read a file larger than one window, page it with `read_file` `offset`/`limit` and follow the `continue with offset=` notice until you have the whole file.',
+  'If the task mentions a mockup, a screenshot or an asset, `read_file` it: images come back as pictures you can look at. If the tool says the model cannot view images, work from the file name and the code that references it instead of guessing at pixels.',
   'After editing, verify: run the typecheck/lint/format tools if they are in your tool list, and call `get_diagnostics` to confirm the app still builds; fix reported diagnostics before declaring the task done.',
   'If a tool returns `forbidden`, the app lacks that grant — do NOT retry it; explain what is missing instead.',
   'Before you rely on remembered platform knowledge — an SDK export, a design token, how editing works — check whether a listed skill covers it and `load_skill` it. A skill is current; your recollection may not be.',
