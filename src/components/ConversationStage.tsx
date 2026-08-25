@@ -19,6 +19,7 @@ import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
+import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
@@ -59,12 +60,15 @@ export default function ConversationStage() {
   // Tools given to the model. Without the stage tree the agent gets the catalog ONLY —
   // no filesystem tools — so it can never edit the wrong (its own) repo. Run is gated
   // below and a "workspace not ready" notice is shown.
-  const toolset = useMemo(() => {
-    if (!stageTree) return catalogToolset(catalog);
+  const { toolset, skills } = useMemo(() => {
+    // No conferred stage tree ⇒ a catalog-only toolset with no authoring tools, so
+    // `withSkills` offers nothing and `load_skill` is absent — the authoring skills
+    // would be advice the agent cannot act on (R3-331).
+    if (!stageTree) return withSkills(catalogToolset(catalog));
     const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
-    return mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools);
+    return withSkills(mergeToolsets(catalogToolset(catalog), fsTools, projectTools, diagnosticsTools));
   }, [catalog, stageTree]);
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
@@ -178,7 +182,7 @@ export default function ConversationStage() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: buildSystemPrompt({ tools: toolset.tools, workspaceRoot: stageTree?.root, today: todayIso() }),
+        system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot: stageTree?.root, today: todayIso() }),
         history,
         prompt: kickoff,
         // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
