@@ -25,6 +25,28 @@ export interface FsLike {
   stat(path: string): Promise<FsStat>;
   unlink(path: string): Promise<void>;
 }
+
+/**
+ * The wider slice these tools reach for since R3-338 — the same `fs.promises`, minus the
+ * agent's own narrowing.
+ *
+ * `FsLike` above stayed as it was because `projectTools` shares it and needs none of
+ * this. What is added here is exactly what the refactoring primitives require and the
+ * port has always had:
+ *
+ *  - `rename`, so a move is ONE call. Doing it as read + write + delete round-trips the
+ *    whole file through the model's context for no reason and has three chances to
+ *    half-finish.
+ *  - a BYTE-mode `readFile` + a `Uint8Array`-accepting `writeFile`, so copying an image
+ *    or any other binary asset does not corrupt it. Reading a PNG as UTF-8 and writing
+ *    it back mangles it *silently* — the file still exists, at roughly the right size.
+ */
+export interface FsPortLike extends Omit<FsLike, 'readFile' | 'writeFile'> {
+  readFile(path: string, encoding: 'utf8'): Promise<string>;
+  readFile(path: string): Promise<Uint8Array>;
+  writeFile(path: string, data: string | Uint8Array): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+}
 export interface FsDirent {
   name: string;
   isDirectory(): boolean;
@@ -85,7 +107,7 @@ export interface FsToolsOptions {
   /** Absolute mount path the tools are chrooted to (e.g. the app working tree). */
   root: string;
   /** Defaults to the host `fs.promises`. Injected in tests. */
-  fs?: FsLike;
+  fs?: FsPortLike;
   /** When the mount is `ro`, writes/deletes are refused locally (no raw EROFS). */
   readOnly?: boolean;
 }
@@ -255,12 +277,22 @@ export function planEdits(text: string, edits: EditSpec[]): { ok: true; text: st
  */
 export function createFsToolset(opts: FsToolsOptions): Toolset {
   const root = normalizePosix(opts.root);
-  const p: FsLike = opts.fs ?? (fs.promises as unknown as FsLike);
+  const p: FsPortLike = opts.fs ?? (fs.promises as unknown as FsPortLike);
   const readOnly = opts.readOnly ?? false;
 
   const rel = (abs: string): string => {
     const r = abs === root ? '' : abs.slice(root.length + 1);
     return r === '' ? '.' : r;
+  };
+
+  /** Does a path exist? Used to refuse a clobbering move/copy unless asked (R3-338). */
+  const exists = async (abs: string): Promise<boolean> => {
+    try {
+      await p.stat(abs);
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   // Depth-first file walk, bounded by WALK_CAP and skipping heavy dirs. Yields
@@ -508,6 +540,103 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       return { content: hits.length ? hits.join('\n') : '(no matches)' };
     },
 
+    // R3-338 — move/copy/replace: the refactoring primitives. The port already had
+    // `rename`; the agent's own `FsLike` narrowing is what hid it.
+    async move_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      // BOTH paths go through the resolver. A move is the one write that names two
+      // places, so it is also the one that could become a way to write outside the
+      // mount by naming a clever destination — an escape on either side reads back as
+      // "not found", never a disclosure (T24).
+      const from = resolveWithin(root, String(input.from ?? ''));
+      const to = resolveWithin(root, String(input.to ?? ''));
+      if (!from || !to) return notFound;
+      if (from === to) return { content: '"from" and "to" are the same path — nothing to do', isError: true };
+      try {
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.rename(from, to);
+        return { content: `moved ${rel(from)} → ${rel(to)}` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
+
+    async copy_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      const from = resolveWithin(root, String(input.from ?? ''));
+      const to = resolveWithin(root, String(input.to ?? ''));
+      if (!from || !to) return notFound;
+      if (from === to) return { content: '"from" and "to" are the same path — nothing to do', isError: true };
+      try {
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        // BYTES, not text. Reading a PNG as UTF-8 and writing it back mangles it, and
+        // the mangling is silent — the file still exists, at roughly the right size.
+        const bytes = await p.readFile(from);
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.writeFile(to, bytes);
+        return { content: `copied ${rel(from)} → ${rel(to)} (${bytes.length} bytes)` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
+
+    async replace_in_files(input) {
+      const dryRun = input.dry_run === true;
+      if (readOnly && !dryRun) return { content: 'read-only: this mount cannot be written', isError: true };
+      const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
+      const newStr = typeof input.new_string === 'string' ? input.new_string : '';
+      if (!oldStr) return { content: 'replace_in_files requires a non-empty "old_string"', isError: true };
+      if (oldStr === newStr) return { content: '"old_string" and "new_string" are identical — nothing to do', isError: true };
+      const start = resolveWithin(root, String(input.path ?? '.'));
+      if (!start) return notFound;
+      const matcher = typeof input.glob === 'string' && input.glob ? globToRegExp(input.glob) : null;
+
+      const files: string[] = [];
+      await walk(start, files, { n: WALK_CAP });
+      const changed: Array<{ path: string; sites: number }> = [];
+      let total = 0;
+      for (const abs of files) {
+        const r = rel(abs);
+        if (matcher && !matcher.test(r)) continue;
+        let text: string;
+        try {
+          text = await p.readFile(abs, 'utf8');
+        } catch {
+          continue; // binary/unreadable — a text replace has nothing to say about it
+        }
+        const sites = text.split(oldStr).length - 1;
+        if (sites === 0) continue;
+        changed.push({ path: r, sites });
+        total += sites;
+        if (changed.length >= MATCH_CAP) break;
+        if (dryRun) continue;
+        try {
+          await p.writeFile(abs, text.split(oldStr).join(newStr));
+        } catch (e) {
+          // Report what already changed rather than pretending the whole run failed.
+          const partial = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
+          return { content: `failed writing ${r}: ${message(e)}\nchanged so far:\n${partial}`, isError: true };
+        }
+      }
+      if (changed.length === 0) return { content: '(no matches)' };
+      // Per-file counts, always. A replace that reports only "done" is unreviewable —
+      // and this is exactly the operation whose blast radius should be read back as a
+      // diff before it is proposed.
+      const lines = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
+      const head = dryRun
+        ? `would change ${total} site(s) in ${changed.length} file(s) — nothing written`
+        : `changed ${total} site(s) in ${changed.length} file(s)`;
+      const more = changed.length >= MATCH_CAP ? `\n[stopped at ${MATCH_CAP} files — narrow with "path" or "glob"]` : '';
+      return { content: `${head}\n${lines}${more}` };
+    },
+
     async delete_file(input) {
       if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
       const abs = resolveWithin(root, String(input.path ?? ''));
@@ -536,6 +665,9 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     { name: 'stat', description: 'Stat a workspace path: returns its type, size, and mtime.', input_schema: obj({ path: str('Workspace-relative path.') }) },
     { name: 'glob', description: 'Find workspace files matching a glob (`**`, `*`, `?`), e.g. "src/**/*.ts".', input_schema: obj({ pattern: str('Glob pattern, workspace-relative.') }) },
     { name: 'grep', description: 'Search workspace file contents with a JS regex. Returns `path:line: text` hits.', input_schema: obj({ pattern: str('JS regular expression.'), path: str('Subtree to search (default: root).'), flags: str('Regex flags, e.g. "i".') }) },
+    { name: 'move_file', description: 'Move or RENAME a workspace file in one call — the content never passes through you, so prefer this over read + write + delete. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
+    { name: 'copy_file', description: 'Copy a workspace file byte-for-byte — safe for images and other binary assets, which a read-then-write through text would corrupt. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
+    { name: 'replace_in_files', description: 'Replace an exact literal string across many files — the tool for renaming a symbol project-wide. Scope it with `path` and/or `glob`. Reports WHICH files changed and how many sites in each. Run it with `dry_run: true` first to see the blast radius, and read the result back with a diff before proposing it.', input_schema: obj({ old_string: str('Exact literal text to replace (not a regex).'), new_string: str('Replacement text, inserted verbatim.'), path: str('Subtree to search (default: workspace root).'), glob: str('Only files whose workspace-relative path matches this glob, e.g. "src/**/*.ts".'), dry_run: { type: 'boolean', description: 'Report what WOULD change without writing anything (default false).' } }) },
     { name: 'delete_file', description: 'Delete a workspace file.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
   ];
 

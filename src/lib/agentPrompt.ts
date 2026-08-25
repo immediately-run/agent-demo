@@ -67,6 +67,7 @@ const WORKFLOW_GUIDANCE: string[] = [
   'Explore before you edit: use `list_dir`/`glob`/`grep` and `read_file` to understand the code first.',
   'Use `write_file` for a NEW file or a full rewrite; to change part of an EXISTING file use `edit_file` (replace an exact, unique snippet) — never regenerate a large file just to add a few lines.',
   'Changing several places in ONE file is ONE `edit_file` call: pass `edits` with an entry per site. Each entry is matched against the file as it is now, so do not chain them; if any entry fails, none is applied.',
+  'To rename or move a file use `move_file`, and to duplicate one use `copy_file` — never read + write + delete. To rename a symbol across files use `replace_in_files`, with `dry_run: true` first to see the blast radius.',
   'To read a file larger than one window, page it with `read_file` `offset`/`limit` and follow the `continue with offset=` notice until you have the whole file.',
   'After editing, verify: run the typecheck/lint/format tools if they are in your tool list, and call `get_diagnostics` to confirm the app still builds; fix reported diagnostics before declaring the task done.',
   'If a tool returns `forbidden`, the app lacks that grant — do NOT retry it; explain what is missing instead.',

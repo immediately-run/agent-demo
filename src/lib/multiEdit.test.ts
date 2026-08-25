@@ -7,20 +7,25 @@
 // blunt one.
 
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, planEdits, type FsDirent, type FsLike, type FsStat } from './fsTools';
+import { createFsToolset, planEdits, type FsDirent, type FsPortLike, type FsStat } from './fsTools';
 
 /** Minimal in-memory fs — only what edit_file touches. */
-class Mem implements FsLike {
+class Mem implements FsPortLike {
   private files: Record<string, string>;
   constructor(files: Record<string, string>) {
     this.files = files;
   }
-  async readFile(path: string): Promise<string> {
+  async readFile(path: string, encoding?: 'utf8'): Promise<string & Uint8Array> {
     if (!(path in this.files)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-    return this.files[path];
+    const text = this.files[path];
+    return (encoding === 'utf8' ? text : new TextEncoder().encode(text)) as string & Uint8Array;
   }
-  async writeFile(path: string, data: string): Promise<void> {
-    this.files[path] = data;
+  async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+    this.files[path] = typeof data === 'string' ? data : new TextDecoder().decode(data);
+  }
+  async rename(from: string, to: string): Promise<void> {
+    this.files[to] = this.files[from];
+    delete this.files[from];
   }
   async mkdir(): Promise<unknown> {
     return undefined;
