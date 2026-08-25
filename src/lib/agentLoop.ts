@@ -15,6 +15,14 @@
 // COMPACTION when the window fills, a truncated-tool-call guard, and a spend budget
 // replacing the old fixed 12-turn cap. All of it is inert unless a `contextWindow`
 // is supplied, so a caller that passes none behaves exactly as before.
+//
+// PREFIX STABILITY IS LOAD-BEARING (R3-336). The loop's contribution to prompt caching
+// is structural, not a parameter: `system` and `tools` are fixed for a run and are sent
+// BYTE-IDENTICALLY on every turn, while everything that changes is appended to
+// `messages`. That is what the host's cache breakpoints key on. Rebuilding the system
+// prompt per turn — re-stamping a date, re-ordering the tool list — would cost nothing
+// visible and silently turn every cache read into a cache write, so it is asserted in
+// the tests rather than left as a convention.
 
 import type { AgentTool } from './agentTools';
 import {
@@ -69,6 +77,12 @@ export interface ChatMessage {
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+  /** R3-336 — prompt-cache counters, present only where the provider reports them.
+   *  ABSENT is not zero: it means this provider says nothing about caching, which is a
+   *  different fact from "nothing was cached", and conflating them would turn a
+   *  measurement into a guess. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 /** One model turn: the assistant's emitted blocks + why it stopped (+ usage). */
@@ -133,10 +147,25 @@ export interface AgentEvents {
   /** Fired after every turn with the running context size + window (R3-220
    *  loop-observability). `contextTokens` is provider-reported when available, else
    *  a char/4 estimate. */
-  onUsage?(usage: { contextTokens: number; window?: number; spentTokens: number }): void;
+  onUsage?(usage: {
+    contextTokens: number;
+    window?: number;
+    spentTokens: number;
+    /** R3-336 — cumulative cache reads/writes across the run, on providers that report
+     *  them. Surfacing this is what makes the caching claim verifiable rather than
+     *  believed; `undefined` means the provider reported nothing. */
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  }): void;
   /** Fired when the loop compacts the transcript to stay under the context window;
-   *  `summarizedCount` is how many older messages were folded into the summary. */
-  onCompact?(info: { summarizedCount: number }): void;
+   *  `summarizedCount` is how many older messages were folded into the summary.
+   *
+   *  R3-336: a compaction invalidates the conversation-prefix cache it rewrote — the
+   *  durable system+tools prefix survives it — so the next turn pays one prefix
+   *  re-write. `cacheReadTokens`/`cacheWriteTokens` are the run totals AT the
+   *  compaction, which is what lets the cost curve across it be read off rather than
+   *  assumed (exit 2). */
+  onCompact?(info: { summarizedCount: number; cacheReadTokens?: number; cacheWriteTokens?: number }): void;
   /** Fired when the loop stops because the token/spend budget was exhausted. */
   onBudgetStop?(info: { spentTokens: number; tokenBudget: number }): void;
   /** Fired when a turn was truncated (`max_tokens`) while emitting tool calls, so
@@ -430,6 +459,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   // Running context size (provider-reported when available) + cumulative spend.
   let contextTokens = 0;
   let spentTokens = 0;
+  // R3-336 — cumulative cache accounting. `undefined` until a provider reports
+  // something, so "reports nothing" stays distinguishable from "cached nothing".
+  let cacheReadTokens: number | undefined;
+  let cacheWriteTokens: number | undefined;
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // R3-224 (§3.3): the stop button, checked between turns. Combined with the
@@ -464,7 +497,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       if (summarizedCount > 0) {
         messages = compacted;
         contextTokens = estimateTokens(messages);
-        events?.onCompact?.({ summarizedCount });
+        events?.onCompact?.({
+          summarizedCount,
+          ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+          ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+        });
       }
     }
 
@@ -505,7 +542,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         if (summarizedCount === 0) throw e;
         messages = compacted;
         contextTokens = estimateTokens(messages);
-        events?.onCompact?.({ summarizedCount });
+        events?.onCompact?.({
+          summarizedCount,
+          ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+          ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+        });
         res = await sendTurn();
       }
     } catch (e) {
@@ -543,7 +584,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       : estimateTokens(messages) + Math.ceil(textOf(res.content).length / 4);
     contextTokens = turnCost;
     spentTokens += turnCost;
-    events?.onUsage?.({ contextTokens, window, spentTokens });
+    if (res.usage?.cacheReadTokens !== undefined) {
+      cacheReadTokens = (cacheReadTokens ?? 0) + res.usage.cacheReadTokens;
+    }
+    if (res.usage?.cacheWriteTokens !== undefined) {
+      cacheWriteTokens = (cacheWriteTokens ?? 0) + res.usage.cacheWriteTokens;
+    }
+    events?.onUsage?.({
+      contextTokens,
+      window,
+      spentTokens,
+      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+      ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    });
 
     const assistantText = textOf(res.content);
     if (assistantText) events?.onAssistantText?.(assistantText);

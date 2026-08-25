@@ -112,7 +112,15 @@ export function createChatModelClient(): ModelClient {
         } else if (d.type === 'reasoning-redacted') {
           reasoning.push({ type: 'reasoning', text: '', redactedData: d.data });
         } else if (d.type === 'usage') {
-          usage = { inputTokens: d.inputTokens, outputTokens: d.outputTokens };
+          // R3-336 — carry the cache counters through verbatim, INCLUDING their
+          // absence: a provider that reports nothing must not look like one that cached
+          // nothing.
+          usage = {
+            inputTokens: d.inputTokens,
+            outputTokens: d.outputTokens,
+            ...(d.cacheReadTokens !== undefined ? { cacheReadTokens: d.cacheReadTokens } : {}),
+            ...(d.cacheWriteTokens !== undefined ? { cacheWriteTokens: d.cacheWriteTokens } : {}),
+          };
         }
       }
       // Reasoning comes FIRST in the turn: it is what the model did before answering,

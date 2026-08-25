@@ -51,6 +51,14 @@ export default function ConversationStage() {
   // R3-335 — the in-flight reasoning for the current turn (cleared when the whole block
   // arrives and becomes a transcript row).
   const [thinking, setThinking] = useState("");
+  // R3-336 — the run's token accounting, including prompt-cache reads/writes where the
+  // provider reports them. Surfacing it is what makes caching verifiable rather than
+  // believed; without a number on screen the cost claim is unfalsifiable.
+  const [usage, setUsage] = useState<{
+    spentTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  } | null>(null);
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
   // Why persistence is unavailable, if it is. The conversation store is not a
@@ -196,6 +204,7 @@ export default function ConversationStage() {
     setRunning(true);
     setStreaming("");
     setThinking("");
+    setUsage(null);
     append({ kind: "user", text: kickoff });
     const controller = new AbortController();
     abortRef.current = controller;
@@ -241,8 +250,23 @@ export default function ConversationStage() {
           onToolUse: (name, input) => append({ kind: "tool", name, input }),
           onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
           onNudge: () => append({ kind: "nudge" }),
-          onCompact: ({ summarizedCount }) =>
-            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
+          onUsage: (u) =>
+            setUsage({
+              spentTokens: u.spentTokens,
+              cacheReadTokens: u.cacheReadTokens,
+              cacheWriteTokens: u.cacheWriteTokens,
+            }),
+          onCompact: ({ summarizedCount, cacheReadTokens }) =>
+            append({
+              kind: "compaction",
+              // R3-336: the compaction rewrote the conversation prefix, so the next turn
+              // re-warms it. The durable system+tools prefix is untouched. Recording the
+              // running cache total AT the boundary is what lets the cost curve across a
+              // compaction be read rather than assumed.
+              summary:
+                `${summarizedCount} earlier messages summarized` +
+                (cacheReadTokens !== undefined ? ` · ${cacheReadTokens} cached tokens read so far` : ""),
+            }),
           onSteer: ({ messages }) => {
             for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
           },
@@ -350,6 +374,16 @@ export default function ConversationStage() {
         <span className="ca-title">{title || "Conversation"}</span>
         <span className="ca-sub">
           {toolset.tools.length} tools {stageTree ? "(catalog + files)" : "(catalog only)"}
+          {usage && (
+            <>
+              {" · "}
+              {usage.spentTokens.toLocaleString()} tokens
+              {/* Shown only when the provider actually reports caching — an absent
+                  counter is not a zero, and a "0 cached" badge on a provider that says
+                  nothing would be a fabricated measurement. */}
+              {usage.cacheReadTokens !== undefined && ` · ${usage.cacheReadTokens.toLocaleString()} cached`}
+            </>
+          )}
         </span>
       </header>
 
