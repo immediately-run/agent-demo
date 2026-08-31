@@ -30,8 +30,9 @@ export interface StoreFs {
 export interface ConversationStore {
   /** Conversation metadata, newest-first. A corrupt file is skipped, not thrown. */
   list(): Promise<ConversationMeta[]>;
-  /** Create, persist, and return a fresh empty conversation. */
-  create(title?: string): Promise<Conversation>;
+  /** Create, persist, and return a fresh empty conversation, stamped with the
+   *  workspace repo when the caller knows it (R3-475). */
+  create(title?: string, repo?: string): Promise<Conversation>;
   /** Load a conversation, or `null` if missing/corrupt. */
   load(id: string): Promise<Conversation | null>;
   /** Persist a conversation, bumping `updatedAt`; returns the persisted record. */
@@ -107,12 +108,13 @@ export function createConversationStore(opts: { root: string; fs: StoreFs }): Co
       const metas: ConversationMeta[] = [];
       for (const id of ids) {
         const conv = await load(id);
-        if (conv) metas.push({ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt });
+        if (conv)
+          metas.push({ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, repo: conv.repo });
       }
       return metas.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, LIST_CAP);
     },
 
-    async create(title) {
+    async create(title, repo) {
       const now = Date.now();
       const conv: Conversation = {
         id: genId(),
@@ -121,6 +123,7 @@ export function createConversationStore(opts: { root: string; fs: StoreFs }): Co
         updatedAt: now,
         schema: 1,
         messages: [],
+        ...(repo ? { repo } : {}),
       };
       await write(conv); // createdAt === updatedAt for a fresh record
       return conv;

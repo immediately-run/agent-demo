@@ -197,6 +197,7 @@
 .ca-steer-now {
   border-color: #fbbf24;
   color: #fbbf24;
+}
 
 /* The model's reasoning (R3-335). Collapsed by default: it is not the reply, and on a
    long run it is much longer than one. Open while it streams, so the user can see that
@@ -222,6 +223,122 @@
   /* Reasoning can be very long; keep it from pushing the reply off screen. */
   max-height: 40vh;
   overflow-y: auto;
+}
+
+/* A folded tool interaction (R3-473): one summary line — status glyph, tool name,
+   salient argument — expandable to the full input and result. Same disclosure
+   pattern as the reasoning rows. Error results render open by default (a failed
+   call folded away hides exactly what the user needs to see). */
+.ca-toolcall {
+  font-size: 12px;
+}
+.ca-toolcall > summary {
+  cursor: pointer;
+  /* A comfortable tap target on a phone without a visible box. */
+  padding: 4px 0;
+  list-style-position: outside;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ca-toolcall-arg {
+  margin-left: 6px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  opacity: 0.6;
+}
+.ca-tool-running {
+  opacity: 0.7;
+}
+.ca-toolcall-body {
+  margin: 4px 0 0 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border, #2a2a2a);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Full input/result, shown only when expanded. Scrolls inside its own box (both
+   axes) so a large read never widens the pane or pushes the reply off screen. */
+.ca-toolcall-pre {
+  margin: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+/* An assistant reply rendered as markdown (R3-474). Keep the transcript's rhythm:
+   tight margins, readable code, media clipped to the pane. */
+.ca-md {
+  white-space: normal;
+  min-width: 0;
+}
+.ca-md > *:first-child {
+  margin-top: 0;
+}
+.ca-md > *:last-child {
+  margin-bottom: 0;
+}
+.ca-md h1,
+.ca-md h2,
+.ca-md h3,
+.ca-md h4 {
+  font-size: 14px;
+  margin: 10px 0 4px;
+}
+.ca-md p,
+.ca-md ul,
+.ca-md ol {
+  margin: 6px 0;
+}
+.ca-md ul,
+.ca-md ol {
+  padding-left: 20px;
+}
+.ca-md code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  background: var(--panel, #161616);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.ca-md pre {
+  background: var(--panel, #161616);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.ca-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.ca-md blockquote {
+  margin: 6px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border, #2a2a2a);
+  opacity: 0.85;
+}
+.ca-md table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.ca-md th,
+.ca-md td {
+  border: 1px solid var(--border, #2a2a2a);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.ca-md img {
+  max-width: 100%;
 }
 
 /* An image the agent read from the workspace (R3-339). Bounded so a screenshot cannot

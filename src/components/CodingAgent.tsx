@@ -24,6 +24,7 @@ import { runAgent } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
+import TranscriptRows from "./TranscriptRows";
 import "./CodingAgent.css";
 
 export default function CodingAgent() {
@@ -200,45 +201,9 @@ export default function CodingAgent() {
       </div>
 
       <ul className="ca-log">
-        {log.map((e, i) => (
-          <li key={i} className={`ca-line ca-${e.kind}`}>
-            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
-            {e.kind === "text" && <span className="ca-text">{e.text}</span>}
-            {e.kind === "tool" && (
-              <span>
-                → <code>{e.name}</code> <code className="ca-args">{JSON.stringify(e.input)}</code>
-              </span>
-            )}
-            {e.kind === "result" && (
-              <span className={e.isError ? "ca-err" : "ca-ok"}>
-                <code>{e.name}</code> {e.isError ? "✗" : "✓"}{" "}
-                <code className="ca-args">{e.content}</code>
-              </span>
-            )}
-            {e.kind === "error" && <span className="ca-err">{e.text}</span>}
-            {e.kind === "nudge" && (
-              <span className="ca-nudge">↺ nudging the model to continue…</span>
-            )}
-            {e.kind === "compaction" && (
-              <span className="ca-compaction" title={e.summary}>
-                ⚑ compacted earlier turns to stay within the context window
-              </span>
-            )}
-            {e.kind === "reasoning" && (
-              <details className="ca-reasoning">
-                <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
-                {!e.redacted && <span className="ca-reasoning-body">{e.text}</span>}
-              </details>
-            )}
-            {e.kind === "image" && (
-              <img
-                className="ca-image"
-                src={`data:${e.mimeType};base64,${e.data}`}
-                alt="Image the agent read from the workspace"
-              />
-            )}
-          </li>
-        ))}
+        {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
+            conversation stage so both transcripts read identically. */}
+        <TranscriptRows log={log} />
         {thinking && (
           <li className="ca-line ca-live">
             {/* Open while it streams — the point is to SHOW that work is happening —

@@ -21,6 +21,14 @@ export interface ConversationMeta {
   createdAt: number;
   /** `Date.now()`, bumped on every save. Drives newest-first ordering. */
   updatedAt: number;
+  /**
+   * The repository this conversation is about (R3-475) — the conferred worktree
+   * mount's label, `owner/repo`. The panel scopes its list on it so different
+   * repos' conversations never mix. Additive-optional (schema stays 1): a legacy
+   * record has none, rides along unscoped, and is stamped on its next save from
+   * a connected workspace.
+   */
+  repo?: string;
 }
 
 /** The full stored record (one JSON file per conversation). */

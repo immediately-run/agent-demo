@@ -3,10 +3,19 @@
 // conversations and a "new" button, and on selection posts the conversation id to
 // the stage over IPC. It runs no agent and holds no net:fetch — all model calls
 // happen in the stage (ConversationStage).
-import { useCallback, useEffect, useRef, useState } from "react";
-import { postToRegion, onRegionMessage, revealRegion } from "@immediately-run/sdk";
+//
+// R3-475 — the list is SCOPED to the repository loaded in the workbench: the host
+// confers the editor session's working tree on this panel too (`exposesWorkingTree:
+// 'ro'`, exactly like `panel.files`), whose mount label is the edited repo's
+// `owner/repo`. Conversations stamped with another repo never mix into the list;
+// they surface under "Other repositories" (repo + count). Legacy unstamped
+// conversations ride along with every scope and get stamped on their next save.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { postToRegion, onRegionMessage, revealRegion, useMounts, getAppMountPath } from "@immediately-run/sdk";
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
+import { findConferredWorktree } from "../lib/fsTools";
+import { scopeConversations } from "../lib/conversationScope";
 import { STAGE_REGION, isUpdated, isRequestSelection } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
@@ -31,17 +40,40 @@ export default function ConversationList() {
   // (R3-247).
   const [storeError, setStoreError] = useState<string | null>(null);
 
-  const select = useCallback((id: string) => {
-    setSelected(id);
-    void postToRegion(STAGE_REGION, { type: "select-conversation", id }).catch(() => {});
-  }, []);
+  // The repository loaded in the workbench (R3-475) — from the conferred working
+  // tree's label, re-derived when mounts churn (switching the loaded app tears the
+  // mount down and mints a new one). `undefined` while no tree is conferred.
+  const mounts = useMounts();
+  const currentRepo = useMemo(() => findConferredWorktree(mounts, getAppMountPath())?.repo, [mounts]);
+
+  // Scope the list (R3-475): this repo's conversations (plus legacy unstamped
+  // ones) vs. every other repo, grouped. Pure rule in conversationScope.ts.
+  const { mine, others } = useMemo(() => scopeConversations(items, currentRepo), [items, currentRepo]);
+
+  // The selection the stage should show: the user's explicit choice while it is
+  // still in scope, else the newest in-scope conversation (so the stage isn't
+  // blank, and a repo switch or delete re-lands somewhere sensible). DERIVED, not
+  // set from an effect — there is one writer (`setSelected`, gesture handlers) and
+  // one announcer (the posting effect below).
+  const effectiveSelected = useMemo(() => {
+    if (selected && mine.some((c) => c.id === selected)) return selected;
+    return mine[0]?.id ?? null;
+  }, [selected, mine]);
+
+  // Announce the selection to the stage whenever it changes — a user's tap and the
+  // bookkeeping fallback go through the same single post, so the two can't race.
+  useEffect(() => {
+    if (!effectiveSelected) return;
+    void postToRegion(STAGE_REGION, { type: "select-conversation", id: effectiveSelected }).catch(() => {});
+  }, [effectiveSelected]);
+
   // The current selection, readable from the IPC listener without re-subscribing it
   // on every change (the stage asks for it when it mounts). Mirrored in an effect,
   // not during render — the listener only ever reads it asynchronously.
   const selectedRef = useRef<string | null>(null);
   useEffect(() => {
-    selectedRef.current = selected;
-  }, [selected]);
+    selectedRef.current = effectiveSelected;
+  }, [effectiveSelected]);
 
   // OPEN = select AND take the user there (R3-243). Distinct from `select` on
   // purpose: only a tap that MEANS "show me this" advances the column. Selecting
@@ -52,13 +84,10 @@ export default function ConversationList() {
   // The host ignores a reveal it doesn't like, so this needs no success handling;
   // it only swallows the authorization rejection (an older host has no `reveal`
   // method, which must degrade to today's behaviour rather than an unhandled reject).
-  const openConversation = useCallback(
-    (id: string) => {
-      select(id);
-      void revealRegion(STAGE_REGION).catch(() => {});
-    },
-    [select],
-  );
+  const openConversation = useCallback((id: string) => {
+    setSelected(id);
+    void revealRegion(STAGE_REGION).catch(() => {});
+  }, []);
 
   const refresh = useCallback(async () => {
     const store = storeRef.current;
@@ -70,7 +99,8 @@ export default function ConversationList() {
     }
   }, []);
 
-  // Open the store, list, and auto-select the newest so the stage isn't blank.
+  // Open the store and list. Selection happens in the scoped effect below, so the
+  // stage isn't seeded with another repo's newest conversation (R3-475).
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -82,7 +112,6 @@ export default function ConversationList() {
         if (!live) return;
         setItems(list);
         setStoreError(null);
-        if (list[0]) select(list[0].id);
       } catch (e) {
         if (live) setStoreError(describeStoreFailure(e));
       } finally {
@@ -92,7 +121,7 @@ export default function ConversationList() {
     return () => {
       live = false;
     };
-  }, [select]);
+  }, []);
 
   // Keep the list fresh: the stage posts "updated" when it derives a title or saves;
   // also re-list when the panel regains focus (cheap belt-and-suspenders).
@@ -127,8 +156,12 @@ export default function ConversationList() {
       return;
     }
     try {
-      const conv = await store.create();
-      setItems((l) => [{ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt }, ...l]);
+      // Stamped with the loaded repo (R3-475) so it scopes correctly from birth.
+      const conv = await store.create(undefined, currentRepo);
+      setItems((l) => [
+        { id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, repo: conv.repo },
+        ...l,
+      ]);
       setStoreError(null);
       openConversation(conv.id);
     } catch (e) {
@@ -144,12 +177,8 @@ export default function ConversationList() {
     } catch {
       /* ignore */
     }
-    const remaining = items.filter((c) => c.id !== id);
-    setItems(remaining);
-    if (selected === id) {
-      if (remaining[0]) select(remaining[0].id);
-      else setSelected(null);
-    }
+    setItems((l) => l.filter((c) => c.id !== id));
+    if (selected === id) setSelected(null); // the scoped effect re-selects
   };
 
   return (
@@ -161,25 +190,31 @@ export default function ConversationList() {
         </button>
       </header>
 
+      {currentRepo && (
+        <p className="cl-scope" title="Conversations are scoped to the repository loaded in the workbench.">
+          {currentRepo}
+        </p>
+      )}
+
       {storeError && (
         <p className="cl-empty cl-error" role="status">
           {storeError}
         </p>
       )}
 
-      {ready && !storeError && items.length === 0 && (
-        <p className="cl-empty">No conversations yet. Start one with “New conversation”.</p>
+      {ready && !storeError && mine.length === 0 && (
+        <p className="cl-empty">No conversations here yet. Start one with “New conversation”.</p>
       )}
 
       <ul className="cl-list">
-        {items.map((c) => (
+        {mine.map((c) => (
           <li
             key={c.id}
-            className={`cl-row${selected === c.id ? " cl-row-active" : ""}`}
+            className={`cl-row${effectiveSelected === c.id ? " cl-row-active" : ""}`}
             onClick={() => openConversation(c.id)}
             tabIndex={0}
             role="button"
-            aria-pressed={selected === c.id}
+            aria-pressed={effectiveSelected === c.id}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
@@ -205,6 +240,30 @@ export default function ConversationList() {
           </li>
         ))}
       </ul>
+
+      {/* Conversations belonging to OTHER repositories (R3-475): visible so they are
+          never lost, but never mixed into the list above. Opening one of these repos
+          in a new tab needs a host-mediated affordance — a tab opened from this
+          sandboxed frame inherits the sandbox (opaque origin, measured) and the
+          workbench cannot run in it — so until that lands the rows name the repo to
+          open rather than pretending a link works. */}
+      {ready && others.length > 0 && (
+        <details className="cl-others">
+          <summary>Other repositories</summary>
+          <ul className="cl-others-list">
+            {others.map((g) => (
+              <li
+                key={g.repo}
+                className="cl-others-row"
+                title={`Open ${g.repo} on immediately.run to see these conversations.`}
+              >
+                <span className="cl-others-repo">{g.repo}</span>
+                <span className="cl-others-count">{g.count}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }
