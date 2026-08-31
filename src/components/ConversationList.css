@@ -97,3 +97,56 @@
 .cl-del:hover {
   opacity: 1;
 }
+
+/* The repository the list is scoped to (R3-475) — a quiet mono caption, mirroring
+   the design system's Space Mono details. */
+.cl-scope {
+  margin: -4px 2px 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Other repositories with conversations (R3-475): visible, countable, never mixed
+   into the main list. Collapsed by default — it is a wayfinding aid, not the list. */
+.cl-others {
+  margin-top: auto;
+  border-top: 1px solid var(--border, #2a2a2a);
+  padding-top: 6px;
+  font-size: 12px;
+}
+.cl-others > summary {
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 4px 0;
+}
+.cl-others-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cl-others-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 2px;
+}
+.cl-others-repo {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cl-others-count {
+  font-size: 11px;
+  opacity: 0.55;
+}

@@ -63,6 +63,8 @@ export interface MountInfo {
   path: string;
   type?: string;
   mode?: 'ro' | 'rw';
+  /** Human-readable label — for a worktree, the EDITED repo's `owner/repo` (§3.5). */
+  name?: string;
 }
 
 /**
@@ -79,9 +81,13 @@ export interface MountInfo {
 export function findConferredWorktree(
   mounts: readonly MountInfo[],
   appMountPath: string,
-): { root: string; readOnly: boolean } | null {
+): { root: string; readOnly: boolean; repo?: string } | null {
   const m = mounts.find((m) => m.type === 'worktree' && m.path !== appMountPath);
-  return m ? { root: m.path, readOnly: m.mode === 'ro' } : null;
+  // `repo` is the mount's label — the host names a worktree with the EDITED repo's
+  // `owner/repo` (the §3.5 working-tree identity fix), which is the durable
+  // scoping key conversations are stamped with (R3-475). Mount ids/paths churn
+  // per session; the label doesn't.
+  return m ? { root: m.path, readOnly: m.mode === 'ro', repo: m.name } : null;
 }
 
 /**

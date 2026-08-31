@@ -24,8 +24,10 @@ import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
+import { scopeConversations } from "../lib/conversationScope";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
+import TranscriptRows from "./TranscriptRows";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe } from "../lib/storeError";
 import "./CodingAgent.css";
@@ -118,7 +120,17 @@ export default function ConversationStage() {
     [showConversation],
   );
 
-  // Open the store; if no selection arrives, show the newest so the stage isn't blank.
+  // The workspace repo, readable from the boot effect below without re-running it
+  // when the mount arrives (the effect opens the store ONCE; the fallback simply
+  // uses whatever repo is known at that moment — the panel's select corrects it).
+  const stageRepoRef = useRef(stageTree?.repo);
+  useEffect(() => {
+    stageRepoRef.current = stageTree?.repo;
+  }, [stageTree]);
+
+  // Open the store; if no selection arrives, show the newest IN SCOPE (R3-475 —
+  // the same repo partition the panel applies) so the stage isn't blank and never
+  // seeds itself with another repo's conversation.
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -128,8 +140,8 @@ export default function ConversationStage() {
         storeRef.current = store;
         setStoreError(null);
         if (!convRef.current) {
-          const [newest] = await store.list();
-          if (newest && live) await loadConversation(newest.id);
+          const [newest] = scopeConversations(await store.list(), stageRepoRef.current).mine;
+          if (newest && live && !convRef.current) await loadConversation(newest.id);
         }
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
@@ -180,11 +192,12 @@ export default function ConversationStage() {
       return;
     }
     const store = storeRef.current;
-    // Ensure a conversation exists to attach this run to.
+    // Ensure a conversation exists to attach this run to, stamped with the
+    // workspace repo so the panel scopes it correctly (R3-475).
     let conv = convRef.current;
     if (!conv && store) {
       try {
-        conv = await store.create();
+        conv = await store.create(undefined, stageTree.repo);
         convRef.current = conv;
         setTitle(conv.title);
         setStoreError(null);
@@ -274,7 +287,14 @@ export default function ConversationStage() {
       if (conv && store) {
         const newTitle = conv.title === "New conversation" ? deriveTitle(transcript) : conv.title;
         try {
-          convRef.current = await store.save({ ...conv, title: newTitle, messages: transcript });
+          // A legacy (unstamped) conversation gets the repo it is CONTINUED in
+          // (R3-475); one already stamped keeps the repo it started with.
+          convRef.current = await store.save({
+            ...conv,
+            title: newTitle,
+            messages: transcript,
+            repo: conv.repo ?? stageTree.repo,
+          });
           setTitle(newTitle);
           setStoreError(null);
           void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
@@ -353,52 +373,13 @@ export default function ConversationStage() {
       )}
 
       <ul className="ca-log" aria-live="polite">
-        {log.map((e, i) => (
-          <li key={i} className={`ca-line ca-${e.kind}`}>
-            {e.kind === "user" && <span className="ca-user">{e.text}</span>}
-            {e.kind === "text" && <span className="ca-text">{e.text}</span>}
-            {e.kind === "tool" && (
-              <span>
-                → <code>{e.name}</code> <code className="ca-args">{JSON.stringify(e.input)}</code>
-              </span>
-            )}
-            {e.kind === "result" && (
-              <span className={e.isError ? "ca-err" : "ca-ok"}>
-                <code>{e.name}</code> {e.isError ? "✗" : "✓"} <code className="ca-args">{e.content}</code>
-              </span>
-            )}
-            {e.kind === "error" && <span className="ca-err">{e.text}</span>}
-            {e.kind === "nudge" && (
-              <span className="ca-nudge">↺ nudging the model to continue…</span>
-            )}
-            {e.kind === "compaction" && (
-              <span className="ca-compaction" title={e.summary}>
-                ⚑ compacted earlier turns to stay within the context window
-              </span>
-            )}
-            {e.kind === "steer" && (
-              <span className="ca-steer">
-                {e.mode === "interrupt" ? "⟂ interrupted and steered:" : "↳ steered:"} {e.text}
-              </span>
-            )}
-            {e.kind === "interrupted" && (
-              <span className="ca-interrupted">⟂ turn interrupted by you</span>
-            )}
-            {e.kind === "reasoning" && (
-              <details className="ca-reasoning">
-                <summary>{e.redacted ? "thinking (redacted by the provider)" : "thinking"}</summary>
-                {!e.redacted && <span className="ca-reasoning-body">{e.text}</span>}
-              </details>
-            )}
-            {e.kind === "image" && (
-              <img
-                className="ca-image"
-                src={`data:${e.mimeType};base64,${e.data}`}
-                alt="Image the agent read from the workspace"
-              />
-            )}
-          </li>
-        ))}
+        {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
+            standalone CodingAgent so both transcripts read identically. */}
+        <TranscriptRows log={log} />
+        {/* The live streaming row stays PLAIN text (R3-474): re-parsing an
+            incomplete markdown document per delta flickers (an unclosed code fence
+            swallows the tail); the row swaps to rendered markdown when the turn
+            completes into a transcript entry above. */}
         {thinking && (
           <li className="ca-line ca-live">
             {/* Open while it streams — the point is to SHOW that work is happening —
