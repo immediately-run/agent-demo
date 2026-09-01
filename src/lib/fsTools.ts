@@ -81,13 +81,14 @@ export interface MountInfo {
 export function findConferredWorktree(
   mounts: readonly MountInfo[],
   appMountPath: string,
-): { root: string; readOnly: boolean; repo?: string } | null {
+): { root: string; readOnly: boolean } | null {
   const m = mounts.find((m) => m.type === 'worktree' && m.path !== appMountPath);
-  // `repo` is the mount's label — the host names a worktree with the EDITED repo's
-  // `owner/repo` (the §3.5 working-tree identity fix), which is the durable
-  // scoping key conversations are stamped with (R3-475). Mount ids/paths churn
-  // per session; the label doesn't.
-  return m ? { root: m.path, readOnly: m.mode === 'ro', repo: m.name } : null;
+  // Deliberately returns the FILESYSTEM facts only. It used to also hand back the
+  // mount's `owner/repo` label as the conversation scoping key (R3-475), which made
+  // the panel's scope depend on a filesystem port it should never have needed — the
+  // coupling R3-491 removed. Both halves now read the scoping key from
+  // `useWorkspace()`; this answers only "which tree does the agent author".
+  return m ? { root: m.path, readOnly: m.mode === 'ro' } : null;
 }
 
 /**

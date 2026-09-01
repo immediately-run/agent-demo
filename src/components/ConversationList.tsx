@@ -11,10 +11,9 @@
 // they surface under "Other repositories" (repo + count). Legacy unstamped
 // conversations ride along with every scope and get stamped on their next save.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { postToRegion, onRegionMessage, revealRegion, useMounts, getAppMountPath } from "@immediately-run/sdk";
+import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@immediately-run/sdk";
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
-import { findConferredWorktree } from "../lib/fsTools";
 import { scopeConversations } from "../lib/conversationScope";
 import { STAGE_REGION, isUpdated, isRequestSelection } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
@@ -40,11 +39,11 @@ export default function ConversationList() {
   // (R3-247).
   const [storeError, setStoreError] = useState<string | null>(null);
 
-  // The repository loaded in the workbench (R3-475) — from the conferred working
-  // tree's label, re-derived when mounts churn (switching the loaded app tears the
-  // mount down and mints a new one). `undefined` while no tree is conferred.
-  const mounts = useMounts();
-  const currentRepo = useMemo(() => findConferredWorktree(mounts, getAppMountPath())?.repo, [mounts]);
+  // The repository loaded in the workbench (R3-475), from the baseline workspace
+  // channel (R3-491). `undefined` when there is no editing session — the channel
+  // reports `null` and `scopeConversations` then lists only unstamped conversations,
+  // which is the honest answer rather than a guess.
+  const currentRepo = useWorkspace()?.label;
 
   // Scope the list (R3-475): this repo's conversations (plus legacy unstamped
   // ones) vs. every other repo, grouped. Pure rule in conversationScope.ts.
