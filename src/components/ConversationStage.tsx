@@ -9,6 +9,7 @@ import {
   useCatalog,
   useMounts,
   getAppMountPath,
+  useWorkspace,
   postToRegion,
   onRegionMessage,
   describeChat,
@@ -120,13 +121,24 @@ export default function ConversationStage() {
     [showConversation],
   );
 
-  // The workspace repo, readable from the boot effect below without re-running it
-  // when the mount arrives (the effect opens the store ONCE; the fallback simply
-  // uses whatever repo is known at that moment — the panel's select corrects it).
-  const stageRepoRef = useRef(stageTree?.repo);
+  // The SCOPING KEY — the repo conversations are stamped with and partitioned by.
+  //
+  // Read from the baseline workspace channel (R3-491), NOT from `stageTree.repo`,
+  // even though both are the same string (R-UAA-16). The stamp and the panel's scope
+  // have to come from ONE source: they are compared for equality, so the day the two
+  // derivations diverge every existing stamp silently stops matching and every
+  // conversation lands under "Other repositories" — which is the R3-475 bug, just
+  // arrived by a different route. `stageTree` stays what it is actually for: the
+  // filesystem root the agent authors.
+  const workspaceRepo = useWorkspace()?.label;
+
+  // Readable from the boot effect below without re-running it when the workspace
+  // arrives (the effect opens the store ONCE; the fallback simply uses whatever repo
+  // is known at that moment — the panel's select corrects it).
+  const stageRepoRef = useRef(workspaceRepo);
   useEffect(() => {
-    stageRepoRef.current = stageTree?.repo;
-  }, [stageTree]);
+    stageRepoRef.current = workspaceRepo;
+  }, [workspaceRepo]);
 
   // Open the store; if no selection arrives, show the newest IN SCOPE (R3-475 —
   // the same repo partition the panel applies) so the stage isn't blank and never
@@ -197,7 +209,7 @@ export default function ConversationStage() {
     let conv = convRef.current;
     if (!conv && store) {
       try {
-        conv = await store.create(undefined, stageTree.repo);
+        conv = await store.create(undefined, workspaceRepo);
         convRef.current = conv;
         setTitle(conv.title);
         setStoreError(null);
@@ -293,7 +305,7 @@ export default function ConversationStage() {
             ...conv,
             title: newTitle,
             messages: transcript,
-            repo: conv.repo ?? stageTree.repo,
+            repo: conv.repo ?? workspaceRepo,
           });
           setTitle(newTitle);
           setStoreError(null);

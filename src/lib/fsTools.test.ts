@@ -59,6 +59,23 @@ describe('findConferredWorktree (stage agent — never self)', () => {
     expect(findConferredWorktree([{ path: OWN, type: 'repo', mode: 'rw' as const }], OWN)).toBeNull();
     expect(findConferredWorktree([], OWN)).toBeNull();
   });
+
+  // R3-491: this answers "which tree does the agent author", and NOTHING else. It
+  // used to also hand back the mount's `owner/repo` label as the conversation
+  // scoping key, which made the panel's scope depend on a filesystem port it should
+  // never have needed. Both halves read that key from `useWorkspace()` now, and the
+  // label must not come back here — otherwise the coupling silently returns the
+  // first time someone reaches for the convenient field.
+  it('does NOT return the mount label — the scoping key is not a filesystem fact', () => {
+    const mounts = [
+      { path: OWN, type: 'worktree', mode: 'rw' as const, name: 'immediately-run/agent-demo' },
+      { path: '/mnt/stage-grove', type: 'worktree', mode: 'ro' as const, name: 'neumark-family/recipes' },
+    ];
+    const conferred = findConferredWorktree(mounts, OWN);
+    // Exactly the filesystem facts — a `name`/`repo` field would fail this.
+    expect(conferred).toEqual({ root: '/mnt/stage-grove', readOnly: true });
+    expect(Object.keys(conferred!).sort()).toEqual(['readOnly', 'root']);
+  });
 });
 
 // A tiny in-memory fs implementing the FsPortLike subset the tools use. Paths are
