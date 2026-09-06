@@ -10,6 +10,26 @@
 #
 # Pages is auto-provisioned by the `actions/configure-pages` step below
 # (enablement: true), so no manual Settings → Pages step is needed on a fresh repo.
+#
+# Self-provisioning needs a token that may CREATE the Pages site: the default
+# workflow `GITHUB_TOKEN` cannot (the enablement API answers "Resource not
+# accessible by integration" on a brand-new repo). The step below mints a
+# short-lived token from the org's **deploy GitHub App** (the same App the
+# `deploy` repo uses) via `actions/create-github-app-token`, then hands it to
+# `configure-pages`. Requirements (one-time, org owner):
+#   - the deploy App has **Pages: write** + **Administration: write** repo
+#     permissions and is installed on this repo (org-wide install is simplest);
+#   - its `DEPLOY_APP_ID` + `DEPLOY_APP_PRIVATE_KEY` are **organization secrets**
+#     scoped to ALL repositories in the org, so a repo created a minute ago can
+#     read them (they were scoped to "selected repositories" until R3-410; every
+#     fresh repo failed its first two runs until an owner widened them).
+# When those secrets are absent — a fork, or any repo outside the org — the mint
+# step is skipped, the step falls back to `GITHUB_TOKEN`, and on a repo without
+# Pages it fails with "Create Pages site failed: Resource not accessible by
+# integration". Fix: enable Pages once by hand (`gh api -X POST
+# repos/<owner>/<repo>/pages -f build_type=workflow`, or Settings → Pages →
+# Source: GitHub Actions) and re-run. Repos with Pages already on are unaffected.
+# See ZIP_CACHE_AUTOMATION_SPEC §8.
 
 name: Cache for immediately.run
 
@@ -44,16 +64,40 @@ jobs:
         with:
           node-version: 22
 
+      # Mint a short-lived token from the org's deploy GitHub App, scoped (by
+      # default) to THIS repo only — used solely to enable Pages on a fresh repo.
+      # Skipped when the App secrets aren't set, so the step below falls back to
+      # GITHUB_TOKEN. The token is an output consumed only by configure-pages; the
+      # cache-zip build never sees it.
+      # `secrets` cannot be referenced in a step `if:` (GitHub rejects the
+      # workflow at parse time — "Unrecognized named-value: 'secrets'"). Surface
+      # the App id through `env` first, then gate on `env`, which IS allowed.
+      - name: Mint Pages-enablement token
+        id: pages-token
+        env:
+          DEPLOY_APP_ID: ${{ secrets.DEPLOY_APP_ID }}
+        if: ${{ env.DEPLOY_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
       # Auto-provision GitHub Pages so the deploy job can publish even on a
       # freshly-created repo. Without this, `deploy-pages` 404s every run until
       # someone manually flips Settings → Pages → Source: GitHub Actions.
+      #
+      # `token`: enabling Pages on a fresh repo needs more than the workflow
+      # GITHUB_TOKEN carries — use the deploy-App token minted above when present,
+      # else fall back to GITHUB_TOKEN so repos that already have Pages enabled
+      # keep working unchanged.
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         with:
           enablement: true
+          token: ${{ steps.pages-token.outputs.token || github.token }}
 
       - name: Build cache zip
         run: |
-          npx -y @immediately-run/cli@0.5.1 cache-zip \
+          npx -y @immediately-run/cli@0.8.0 cache-zip \
             --owner "${{ github.repository_owner }}" \
             --repo "${{ github.event.repository.name }}" \
             --ref "${{ github.ref_name }}" \
