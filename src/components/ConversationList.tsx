@@ -173,11 +173,16 @@ export default function ConversationList() {
     if (!store) return;
     try {
       await store.remove(id);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // A delete that failed must leave the row in place and say why (R-IX-3):
+      // dropping it anyway would show a change that did not happen. Same
+      // failure surface as create/save above.
+      setStoreError(describeStoreFailure(e));
+      return;
     }
     setItems((l) => l.filter((c) => c.id !== id));
     if (selected === id) setSelected(null); // the scoped effect re-selects
+    setStoreError(null);
   };
 
   return (

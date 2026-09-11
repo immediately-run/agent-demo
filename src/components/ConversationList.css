@@ -54,10 +54,16 @@
   border-radius: 8px;
   cursor: pointer;
 }
-.cl-row:hover,
+.cl-row:hover {
+  background: var(--panel, #161616);
+}
+/* Keyboard focus must be SEEN (WCAG 2.4.7): a background shift alone is too
+   faint, so the row also gets the design system's violet accent ring (index.css
+   --accent-2 / --glow hue) via box-shadow, which follows the row's radius. */
 .cl-row:focus-visible {
   background: var(--panel, #161616);
   outline: none;
+  box-shadow: 0 0 0 2px var(--accent-2, #b285f2);
 }
 .cl-row-active {
   border-color: var(--border, #2a2a2a);
@@ -89,6 +95,13 @@
   font-size: 18px;
   line-height: 1;
   padding: 0 4px;
+  /* A comfortable tap target on a phone (WCAG 2.5.8) — the .ca-queued-cancel
+     pattern (CodingAgent.css), glyph centered so the × stays put. */
+  min-width: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .cl-row:hover .cl-del,
 .cl-row:focus-within .cl-del {
