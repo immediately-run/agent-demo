@@ -200,7 +200,9 @@ export default function CodingAgent() {
         </button>
       </div>
 
-      <ul className="ca-log">
+      {/* aria-live matches the conversation stage's transcript (ConversationStage),
+           so screen readers hear turns land here too. */}
+      <ul className="ca-log" aria-live="polite">
         {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
             conversation stage so both transcripts read identically. */}
         <TranscriptRows log={log} />

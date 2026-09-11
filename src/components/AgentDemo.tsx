@@ -203,7 +203,7 @@ export default function AgentDemo() {
               title={m.stream ? "streaming — use invokeStream" : `requires ${m.capability}`}
               onClick={() => run(m.name)}
             >
-              {running === m.name ? "…" : "Run"}
+              {running === m.name ? "Running…" : "Run"}
             </button>
           </li>
         ))}
@@ -215,8 +215,13 @@ export default function AgentDemo() {
           <code>{OFF_CATALOG}</code> is {inCatalog(OFF_CATALOG) ? "in" : "NOT in"} this app's
           catalog. Calling it anyway should be refused by the host gate:
         </p>
-        <button type="button" className="ad-run ad-danger" onClick={() => run(OFF_CATALOG)}>
-          Try {OFF_CATALOG}
+        <button
+          type="button"
+          className="ad-run ad-danger"
+          disabled={running === OFF_CATALOG}
+          onClick={() => run(OFF_CATALOG)}
+        >
+          {running === OFF_CATALOG ? "Trying…" : `Try ${OFF_CATALOG}`}
         </button>
       </div>
 
@@ -240,7 +245,7 @@ export default function AgentDemo() {
             disabled={posting === FILES_REGION}
             onClick={() => post(FILES_REGION, { reveal: path })}
           >
-            Reveal in Files
+            {posting === FILES_REGION ? "Sending…" : "Reveal in Files"}
           </button>
         </div>
         <p className="ad-escape-sub">
@@ -253,7 +258,7 @@ export default function AgentDemo() {
           disabled={posting === NO_EDGE_REGION}
           onClick={() => post(NO_EDGE_REGION, { reveal: path })}
         >
-          Try messaging {NO_EDGE_REGION}
+          {posting === NO_EDGE_REGION ? "Sending…" : `Try messaging ${NO_EDGE_REGION}`}
         </button>
 
         {ipcLog.length > 0 && (
