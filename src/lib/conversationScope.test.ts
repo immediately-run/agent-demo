@@ -5,7 +5,8 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('@immediately-run/sdk', () => ({ openSettings: vi.fn() }));
 
 import { scopeConversations } from './conversationScope';
-import { createConversationStore, type StoreFs } from './conversationStore';
+import { createConversationStore } from './conversationStore';
+import { MemFs } from './testing/memStoreFs';
 import type { ConversationMeta } from './conversationModel';
 
 const meta = (id: string, repo: string | undefined, updatedAt: number): ConversationMeta => ({
@@ -45,34 +46,8 @@ describe('scopeConversations', () => {
 // The stamping half (R3-475), driven through the REAL store over an in-memory fs
 // (§4: the producer of the metas the scope rule consumes).
 describe('conversation repo stamping', () => {
-  const memFs = (): StoreFs => {
-    const files = new Map<string, string>();
-    return {
-      async readFile(path) {
-        const v = files.get(path);
-        if (v === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-        return v;
-      },
-      async writeFile(path, data) {
-        files.set(path, data);
-      },
-      async readdir(dirPath) {
-        const prefix = `${dirPath}/`;
-        return [...files.keys()]
-          .filter((p) => p.startsWith(prefix))
-          .map((p) => ({ name: p.slice(prefix.length), isDirectory: () => false }));
-      },
-      async mkdir() {
-        return undefined;
-      },
-      async unlink(path) {
-        files.delete(path);
-      },
-    };
-  };
-
   it('create stamps the repo and list projects it', async () => {
-    const store = createConversationStore({ root: '/settings', fs: memFs() });
+    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
     await store.create(undefined, 'acme/app');
     await store.create(); // unscoped (no workspace at creation)
     const metas = await store.list();
@@ -80,7 +55,7 @@ describe('conversation repo stamping', () => {
   });
 
   it('a legacy record is stamped by a later save and survives a reload', async () => {
-    const fs = memFs();
+    const fs = new MemFs();
     const store = createConversationStore({ root: '/settings', fs });
     const legacy = await store.create(); // unstamped
     await store.save({ ...legacy, repo: legacy.repo ?? 'acme/app' }); // the stage's save rule
