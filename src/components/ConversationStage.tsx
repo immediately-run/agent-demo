@@ -25,7 +25,7 @@ import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
-import { scopeConversations } from "../lib/conversationScope";
+import { createStageSelection, type StageSelection } from "../lib/stageSelection";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
@@ -111,15 +111,18 @@ export default function ConversationStage() {
     setStreaming("");
   }, []);
 
-  const loadConversation = useCallback(
-    async (id: string) => {
-      const store = storeRef.current;
-      if (!store) return;
-      const conv = await store.load(id);
-      if (conv) showConversation(conv);
-    },
-    [showConversation],
-  );
+  // One arbiter per mount (never module scope): it holds the held selection and the
+  // latest-wins ticket, and is created fresh so a remount starts clean. Created in an
+  // effect rather than during render — `show` = `showConversation` writes `convRef`, and
+  // the React Compiler's `refs` rule forbids a ref access (or a function carrying one)
+  // from reaching a render path.
+  const stageSelectionRef = useRef<StageSelection | null>(null);
+  useEffect(() => {
+    stageSelectionRef.current = createStageSelection({ show: showConversation });
+    return () => {
+      stageSelectionRef.current = null;
+    };
+  }, [showConversation]);
 
   // The SCOPING KEY — the repo conversations are stamped with and partitioned by.
   //
@@ -142,7 +145,9 @@ export default function ConversationStage() {
 
   // Open the store; if no selection arrives, show the newest IN SCOPE (R3-475 —
   // the same repo partition the panel applies) so the stage isn't blank and never
-  // seeds itself with another repo's conversation.
+  // seeds itself with another repo's conversation. The arbiter owns which of the
+  // held selection / newest fallback wins, so a selection that landed before the
+  // store opened is not dropped.
   useEffect(() => {
     let live = true;
     void (async () => {
@@ -151,10 +156,7 @@ export default function ConversationStage() {
         if (!live) return;
         storeRef.current = store;
         setStoreError(null);
-        if (!convRef.current) {
-          const [newest] = scopeConversations(await store.list(), stageRepoRef.current).mine;
-          if (newest && live && !convRef.current) await loadConversation(newest.id);
-        }
+        await stageSelectionRef.current!.storeOpened(store, stageRepoRef.current);
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
         // must see, because it costs them conversation memory.
@@ -164,14 +166,14 @@ export default function ConversationStage() {
     return () => {
       live = false;
     };
-  }, [loadConversation]);
+  }, []);
 
   // The panel drives which conversation is shown.
   useEffect(() => {
     return onRegionMessage((m) => {
-      if (isSelect(m.data)) void loadConversation(m.data.id);
+      if (isSelect(m.data)) void stageSelectionRef.current!.select(m.data.id);
     });
-  }, [loadConversation]);
+  }, []);
 
   // Ask the panel what it has selected, once, on mount (R3-243).
   //
@@ -211,6 +213,7 @@ export default function ConversationStage() {
       try {
         conv = await store.create(undefined, workspaceRepo);
         convRef.current = conv;
+        stageSelectionRef.current!.adopt(conv);
         setTitle(conv.title);
         setStoreError(null);
       } catch (e) {
