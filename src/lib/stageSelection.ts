@@ -1,7 +1,7 @@
 // The stage-selection arbiter (agent-conversations plan 05 / R3-594). Pure: it orders
 // the three ways a conversation can become current — an explicit panel selection (which
 // may arrive before the store opens), the newest-in-scope fallback, and `run()`'s freshly
-// created conversation — so the LATEST request wins no matter what order their loads
+// created conversation — so the latest request wins no matter what order their loads
 // settle. Extracted out of `ConversationStage` because agent-demo's vitest runs in node
 // with no DOM, so logic left in a component cannot be tested.
 
@@ -28,7 +28,7 @@ export interface StageSelection {
  * Build the arbiter over a single `show` callback.
  *
  * The latest-wins ticket works because every load captures its ticket when it is
- * INITIATED (`++latest`), and a load whose ticket is stale when its `store.load` settles
+ * initiated (`++latest`), and a load whose ticket is stale when its `store.load` settles
  * is discarded — without it, a fallback `list()`/`load()` that finishes after a `select`
  * would put the newest conversation back on screen.
  */
@@ -76,7 +76,7 @@ export function createStageSelection({ show }: { show: (conv: Conversation) => v
         heldResolve = null;
         return result;
       }
-      // Nothing selected AND nothing shown: the plan-05 fallback.
+      // Nothing selected and nothing shown: the plan-05 fallback.
       if (shown) return 'shown';
       const ticket = ++latest;
       const [newest] = scopeConversations(await store.list(), repo).mine;

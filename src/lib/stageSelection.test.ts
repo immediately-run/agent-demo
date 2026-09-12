@@ -159,4 +159,67 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     await expect(stage.select('does-not-exist')).resolves.toBe('missing');
     expect(show).not.toHaveBeenCalled();
   });
+
+  it("the store opening after an adoption does not replace it (shown guard)", async () => {
+    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const show = vi.fn();
+    const stage = createStageSelection({ show });
+
+    const adopted: Conversation = {
+      id: 'adopted',
+      title: 'Adopted',
+      createdAt: 1,
+      updatedAt: 1,
+      schema: 1,
+      messages: [],
+    };
+    stage.adopt(adopted);
+
+    await expect(stage.storeOpened(store, REPO)).resolves.toBe('shown');
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(shownOf('adopted'));
+  });
+
+  it('a second selection made while the store is still closed supersedes the first', async () => {
+    const fs = new MemFs();
+    const store = createConversationStore({ root: '/settings', fs });
+    const older = await store.create('older', REPO);
+    const newer = await store.create('newer', REPO);
+
+    const show = vi.fn();
+    const stage = createStageSelection({ show });
+    const pFirst = stage.select(older.id); // store not open yet → held
+    const pSecond = stage.select(newer.id); // held → supersedes the first
+
+    await expect(pFirst).resolves.toBe('superseded');
+
+    await stage.storeOpened(store, REPO);
+    await expect(pSecond).resolves.toBe('shown');
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(shownOf(newer.id));
+  });
+
+  it('adopting while a selection is still held supersedes that selection', async () => {
+    const fs = new MemFs();
+    const store = createConversationStore({ root: '/settings', fs });
+    const held = await store.create('held', REPO);
+
+    const show = vi.fn();
+    const stage = createStageSelection({ show });
+    const pSelect = stage.select(held.id); // store not open yet → held
+
+    const adopted: Conversation = {
+      id: 'adopted',
+      title: 'Adopted',
+      createdAt: 1,
+      updatedAt: 1,
+      schema: 1,
+      messages: [],
+    };
+    stage.adopt(adopted);
+
+    await expect(pSelect).resolves.toBe('superseded');
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(shownOf('adopted'));
+  });
 });
