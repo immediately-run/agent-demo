@@ -63,6 +63,9 @@ export default function ConversationStage() {
     cacheWriteTokens?: number;
   } | null>(null);
   const [running, setRunning] = useState(false);
+  // Which conversation a run is in flight for — a ref, so the arbiter's per-id probe can
+  // read it without rebuilding. Set when a run starts, cleared when it ends.
+  const runningIdRef = useRef<string | null>(null);
   const [title, setTitle] = useState<string>("");
   // The conversation currently shown — keys the transcript scroller so a switch resets
   // its follow state (a release in one conversation must not carry into the next).
@@ -138,7 +141,10 @@ export default function ConversationStage() {
   // from reaching a render path.
   const stageSelectionRef = useRef<StageSelection | null>(null);
   useEffect(() => {
-    stageSelectionRef.current = createStageSelection({ show: showConversation });
+    stageSelectionRef.current = createStageSelection({
+      show: showConversation,
+      isRunning: (id) => runningIdRef.current === id,
+    });
     return () => {
       stageSelectionRef.current = null;
     };
@@ -249,6 +255,7 @@ export default function ConversationStage() {
     const kickoff = prompt;
     setPrompt("");
     setRunning(true);
+    runningIdRef.current = conv?.id ?? null;
     setStreaming("");
     setThinking("");
     setUsage(null);
@@ -350,6 +357,7 @@ export default function ConversationStage() {
       setStreaming("");
       setThinking("");
       setRunning(false);
+      runningIdRef.current = null;
       abortRef.current = null;
     }
   };

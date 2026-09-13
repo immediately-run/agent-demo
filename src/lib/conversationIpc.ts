@@ -41,6 +41,10 @@ export type ConversationIpcMsg =
 export const isSelect = (m: unknown): m is SelectConversationMsg =>
   (m as { type?: string })?.type === 'select-conversation' && typeof (m as SelectConversationMsg).id === 'string';
 
+/** Build a panel→stage "show this conversation" message. The one place the shape is
+ *  spelled, so the announcing sites cannot drift (R3-616 / R6). */
+export const selectMessage = (id: string): SelectConversationMsg => ({ type: 'select-conversation', id });
+
 export const isUpdated = (m: unknown): m is ConversationUpdatedMsg =>
   (m as { type?: string })?.type === 'conversation-updated' && typeof (m as ConversationUpdatedMsg).id === 'string';
 

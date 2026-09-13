@@ -15,7 +15,7 @@ import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@imme
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations } from "../lib/conversationScope";
-import { STAGE_REGION, isUpdated, isRequestSelection } from "../lib/conversationIpc";
+import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
 
@@ -52,18 +52,24 @@ export default function ConversationList() {
   // The selection the stage should show: the user's explicit choice while it is
   // still in scope, else the newest in-scope conversation (so the stage isn't
   // blank, and a repo switch or delete re-lands somewhere sensible). DERIVED, not
-  // set from an effect — there is one writer (`setSelected`, gesture handlers) and
-  // one announcer (the posting effect below).
+  // set from an effect — there is one writer (`setSelected`, gesture handlers),
+  // while the announcements come from both a gesture post (`openConversation`,
+  // so a re-tap of the selected row still lands) and the derived-change effect below.
   const effectiveSelected = useMemo(() => {
     if (selected && mine.some((c) => c.id === selected)) return selected;
     return mine[0]?.id ?? null;
   }, [selected, mine]);
 
-  // Announce the selection to the stage whenever it changes — a user's tap and the
-  // bookkeeping fallback go through the same single post, so the two can't race.
+  // Announce a DERIVED selection change to the stage — the bookkeeping fallback (first
+  // row on load, next after a delete/scope change). A user's tap is also announced
+  // directly by `openConversation`, so a re-tap of the already-selected row — which does
+  // not change `effectiveSelected` and so skips this effect — still posts (R3-616). A
+  // tap on a *different* row is therefore announced twice — by the gesture post and
+  // again by this effect — the item's accepted cost, harmless because the arbiter is
+  // idempotent.
   useEffect(() => {
     if (!effectiveSelected) return;
-    void postToRegion(STAGE_REGION, { type: "select-conversation", id: effectiveSelected }).catch(() => {});
+    void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
   }, [effectiveSelected]);
 
   // The current selection, readable from the IPC listener without re-subscribing it
@@ -85,6 +91,10 @@ export default function ConversationList() {
   // method, which must degrade to today's behaviour rather than an unhandled reject).
   const openConversation = useCallback((id: string) => {
     setSelected(id);
+    // A tap is an event, not a state transition: announce it directly (R3-616) so a tap
+    // on the already-selected row still posts — the derived-value effect above only fires
+    // when `effectiveSelected` changes, so the re-tap case was previously silent.
+    void postToRegion(STAGE_REGION, selectMessage(id)).catch(() => {});
     void revealRegion(STAGE_REGION).catch(() => {});
   }, []);
 
@@ -133,10 +143,7 @@ export default function ConversationList() {
       // Answering here is what makes tapping an OLDER conversation land on that one
       // rather than on the newest.
       else if (isRequestSelection(m.data) && selectedRef.current) {
-        void postToRegion(STAGE_REGION, {
-          type: "select-conversation",
-          id: selectedRef.current,
-        }).catch(() => {});
+        void postToRegion(STAGE_REGION, selectMessage(selectedRef.current)).catch(() => {});
       }
     });
     const onFocus = () => void refresh();
