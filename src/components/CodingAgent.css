@@ -4,6 +4,17 @@
   gap: 10px;
   padding: 16px;
   border-bottom: 1px solid var(--border, #2a2a2a);
+  /* Lets the flex children (`.ca-log`) shrink below their content height and scroll once
+     the container has a definite height — provided by `.ca--stage` below for the stage. */
+  min-height: 0;
+}
+/* The stage transcript fills the host region so `.ca-log` is the element that scrolls,
+   not the whole region. A viewport unit resolves against the iframe's region-scaled
+   viewport (the host mounts into a bare #root, so `height: 100%` would compute to auto).
+   Scoped to the stage root: the region-less standalone CodingAgent stays auto-height — a
+   `100dvh` there would pump the host's auto-resize protocol into a growth loop. */
+.ca--stage {
+  height: 100dvh;
 }
 .ca-hd {
   display: flex;
@@ -82,6 +93,11 @@
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
+  /* The transcript is its own scroll container (R3-615): it grows to fill the stage
+     and scrolls internally, so `scrollTop` can be driven to follow the stream. */
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 .ca-line code {
   font-family: var(--mono, ui-monospace, monospace);
@@ -199,6 +215,14 @@
   color: #fbbf24;
 }
 
+/* The steering explanation, moved off the buttons' `title` and onto the surface
+   (R3-615): while a run is in flight this one line says what the field now does,
+   and when the field is empty it says why the send buttons are disabled. */
+.ca-steer-hint {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 /* The model's reasoning (R3-335). Collapsed by default: it is not the reply, and on a
    long run it is much longer than one. Open while it streams, so the user can see that
    work is happening during the stretches compaction now makes possible. */
@@ -212,6 +236,36 @@
   /* A comfortable tap target on a phone without a visible box. */
   padding: 4px 0;
   list-style-position: outside;
+}
+
+/* A sign of life while a turn is in flight (R3-615): a pulsing dot beside the live
+   "thinking…" summary — the repo's first animation, so a turn no longer reads as a
+   static, dead word. Rendered only inside the LIVE summary, never on the settled
+   reasoning rows. */
+@keyframes ca-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.ca-thinking-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: ca-pulse 1.2s ease-in-out infinite;
+}
+/* A real substitution (R11): the pulse becomes a steady dot, not nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .ca-thinking-dot {
+    animation: none;
+  }
 }
 .ca-reasoning-body {
   display: block;

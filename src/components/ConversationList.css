@@ -24,6 +24,9 @@
   font: inherit;
   font-size: 12px;
   cursor: pointer;
+  /* "New conversation" must stay on one line at the panel's minimum width (R3-615). */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .cl-empty {
   margin: 4px 2px;
