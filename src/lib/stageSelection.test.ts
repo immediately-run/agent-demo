@@ -284,4 +284,37 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     expect(show).toHaveBeenCalledTimes(1);
     expect(show).toHaveBeenCalledWith(shownOf(a.id));
   });
+
+  it("ignores a re-select of the adopted conversation while its run is in flight (R3-616)", async () => {
+    const fs = new MemFs();
+    const store = createConversationStore({ root: '/settings', fs });
+
+    const show = vi.fn();
+    let adoptedId = '';
+    const stage = createStageSelection({ show, isRunning: (id) => id === adoptedId });
+    await stage.storeOpened(store, REPO); // empty → shows nothing
+    const adopted = await store.create('adopted', REPO);
+    adoptedId = adopted.id;
+    stage.adopt(adopted);
+    show.mockClear();
+
+    await expect(stage.select(adopted.id)).resolves.toBe('shown');
+    expect(show).toHaveBeenCalledTimes(0); // a run for the adopted conversation is in flight
+  });
+
+  it("re-loads the adopted conversation on a re-select when idle (R3-616)", async () => {
+    const fs = new MemFs();
+    const store = createConversationStore({ root: '/settings', fs });
+
+    const show = vi.fn();
+    const stage = createStageSelection({ show, isRunning: idle });
+    await stage.storeOpened(store, REPO); // empty → shows nothing
+    const adopted = await store.create('adopted', REPO);
+    stage.adopt(adopted);
+    show.mockClear();
+
+    await expect(stage.select(adopted.id)).resolves.toBe('shown');
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(shownOf(adopted.id));
+  });
 });
