@@ -26,6 +26,7 @@ import { runAgent } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import { createStageSelection, type StageSelection } from "../lib/stageSelection";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
@@ -69,6 +70,14 @@ export default function ConversationStage() {
   // chatbot that re-reads nothing between turns. That failure used to be
   // swallowed by empty `catch {}`s — surface it instead (R3-247).
   const [storeError, setStoreError] = useState<string | null>(null);
+
+  // R3-615 — follow the stream. The transcript and the live reasoning box each pin to
+  // their newest row while the reader is at the bottom, and stop the moment they scroll
+  // up — resuming only on return. Two scrollers, one hook, called twice.
+  const logRef = useRef<HTMLUListElement>(null);
+  const reasoningRef = useRef<HTMLSpanElement>(null);
+  useStickToBottom(logRef, log);
+  useStickToBottom(reasoningRef, thinking);
 
   // The STAGE app's working tree, conferred by the host as a `type:'worktree'` mount
   // (AA-23) — NOT the agent's OWN repo. If it isn't conferred (the mount hasn't arrived,
@@ -387,7 +396,7 @@ export default function ConversationStage() {
         </div>
       )}
 
-      <ul className="ca-log" aria-live="polite">
+      <ul className="ca-log" aria-live="polite" ref={logRef}>
         {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
             standalone CodingAgent so both transcripts read identically. */}
         <TranscriptRows log={log} />
@@ -400,8 +409,13 @@ export default function ConversationStage() {
             {/* Open while it streams — the point is to SHOW that work is happening —
                 then collapsed once it becomes a transcript row. */}
             <details className="ca-reasoning" open>
-              <summary>thinking…</summary>
-              <span className="ca-reasoning-body">{thinking}</span>
+              <summary>
+                <span className="ca-thinking-dot" aria-hidden="true" />
+                thinking…
+              </summary>
+              <span className="ca-reasoning-body" ref={reasoningRef}>
+                {thinking}
+              </span>
             </details>
           </li>
         )}
@@ -434,9 +448,16 @@ export default function ConversationStage() {
       )}
 
       {/* One row, two modes. Not running: type a prompt and Run. Running: the same
-          field STEERS — "Next step" queues for the turn boundary, "Now" interrupts
-          the in-flight turn — and Stop still ends the run. The three verbs stay
-          visibly distinct (exit 3) and wrap on a phone (value 8). */}
+          field STEERS — "Send after this step" queues for the turn boundary, "Send now"
+          interrupts the in-flight turn — and Stop still ends the run. The three verbs
+          stay visibly distinct (exit 3) and wrap on a phone (value 8). */}
+      {running && (
+        <p className="ca-steer-hint" role="status">
+          {steerText.trim()
+            ? "The agent is working. Type here to redirect it."
+            : "Type a message to steer"}
+        </p>
+      )}
       <div className="ca-prompt-row">
         <input
           className="ca-prompt"
@@ -460,19 +481,17 @@ export default function ConversationStage() {
               type="button"
               className="ca-steer-btn"
               disabled={!steerText.trim()}
-              title="Apply this at the next step — the current one finishes first"
               onClick={() => steer("queue")}
             >
-              Next step
+              Send after this step
             </button>
             <button
               type="button"
               className="ca-steer-btn ca-steer-now"
               disabled={!steerText.trim()}
-              title="Interrupt the turn in flight and apply this — the run continues"
               onClick={() => steer("interrupt")}
             >
-              Now
+              Send now
             </button>
           </>
         )}
