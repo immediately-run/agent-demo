@@ -61,9 +61,12 @@ export default function ConversationList() {
   }, [selected, mine]);
 
   // Announce a DERIVED selection change to the stage — the bookkeeping fallback (first
-  // row on load, next after a delete/scope change). A user's tap is announced directly
-  // by `openConversation` instead, so a re-tap of the already-selected row — which does
-  // not change `effectiveSelected` and so skips this effect — still posts (R3-616).
+  // row on load, next after a delete/scope change). A user's tap is also announced
+  // directly by `openConversation`, so a re-tap of the already-selected row — which does
+  // not change `effectiveSelected` and so skips this effect — still posts (R3-616). A
+  // tap on a *different* row is therefore announced twice — by the gesture post and
+  // again by this effect — the item's accepted cost, harmless because the arbiter is
+  // idempotent.
   useEffect(() => {
     if (!effectiveSelected) return;
     void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
