@@ -4,9 +4,11 @@
   gap: 10px;
   padding: 16px;
   border-bottom: 1px solid var(--border, #2a2a2a);
-  /* Fill the stage region so `.ca-log` below is the element that scrolls, not the
-     whole region. Mirrors `.cl`'s `height: 100%` (ConversationList.css). */
-  height: 100%;
+  /* Fill the host region so `.ca-log` below is the element that scrolls, not the whole
+     region. The host mounts the app into a bare #root with no definite height, so a
+     `height: 100%` here would compute to auto; a viewport unit resolves against the
+     iframe's own region-scaled viewport instead. */
+  height: 100dvh;
   /* Lets the flex children (`.ca-log`) actually shrink below their content height and
      scroll rather than forcing `.ca` taller than the region. */
   min-height: 0;

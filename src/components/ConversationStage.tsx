@@ -64,6 +64,9 @@ export default function ConversationStage() {
   } | null>(null);
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState<string>("");
+  // The conversation currently shown — keys the transcript scroller so a switch resets
+  // its follow state (a release in one conversation must not carry into the next).
+  const [convId, setConvId] = useState<string | undefined>(undefined);
   // Why persistence is unavailable, if it is. The conversation store is not a
   // nice-to-have: `run()` reads the model's HISTORY out of the persisted
   // conversation, so a dead store silently downgrades the agent to a stateless
@@ -122,6 +125,7 @@ export default function ConversationStage() {
 
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
+    setConvId(conv.id);
     setTitle(conv.title);
     setLog(messagesToLog(conv.messages));
     setStreaming("");
@@ -403,7 +407,7 @@ export default function ConversationStage() {
         </div>
       )}
 
-      <ul className="ca-log" aria-live="polite" ref={logRef}>
+      <ul className="ca-log" aria-live="polite" ref={logRef} key={convId ?? "none"}>
         {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
             standalone CodingAgent so both transcripts read identically. */}
         <TranscriptRows log={log} />
