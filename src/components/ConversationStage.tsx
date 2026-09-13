@@ -63,6 +63,13 @@ export default function ConversationStage() {
     cacheWriteTokens?: number;
   } | null>(null);
   const [running, setRunning] = useState(false);
+  // The `running` value a plain closure (the arbiter's `isRunning` probe) reads — a ref
+  // mirror rather than the state, so the arbiter can be built once and still see the
+  // latest run state.
+  const runningRef = useRef(false);
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
   const [title, setTitle] = useState<string>("");
   // The conversation currently shown — keys the transcript scroller so a switch resets
   // its follow state (a release in one conversation must not carry into the next).
@@ -138,7 +145,10 @@ export default function ConversationStage() {
   // from reaching a render path.
   const stageSelectionRef = useRef<StageSelection | null>(null);
   useEffect(() => {
-    stageSelectionRef.current = createStageSelection({ show: showConversation });
+    stageSelectionRef.current = createStageSelection({
+      show: showConversation,
+      isRunning: () => runningRef.current,
+    });
     return () => {
       stageSelectionRef.current = null;
     };

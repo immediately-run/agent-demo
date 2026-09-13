@@ -85,6 +85,10 @@ export default function ConversationList() {
   // method, which must degrade to today's behaviour rather than an unhandled reject).
   const openConversation = useCallback((id: string) => {
     setSelected(id);
+    // A tap is an event, not a state transition: announce it directly (R3-616) so a tap
+    // on the already-selected row still posts — the derived-value effect above only fires
+    // when `effectiveSelected` changes, so the re-tap case was previously silent.
+    void postToRegion(STAGE_REGION, { type: "select-conversation", id }).catch(() => {});
     void revealRegion(STAGE_REGION).catch(() => {});
   }, []);
 

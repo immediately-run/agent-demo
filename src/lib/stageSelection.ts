@@ -24,15 +24,23 @@ export interface StageSelection {
   adopt(conv: Conversation): void;
 }
 
+export interface StageSelectionOptions {
+  show: (conv: Conversation) => void;
+  /** Whether a run is in flight for the conversation the stage is showing. A re-select
+   * of the shown conversation is a repair gesture (reload it) — unless a run holds it,
+   * in which case the tap is ignored so in-flight work is never discarded. */
+  isRunning: () => boolean;
+}
+
 /**
- * Build the arbiter over a single `show` callback.
+ * Build the arbiter over a single `show` callback and a `isRunning` probe.
  *
  * The latest-wins ticket works because every load captures its ticket when it is
  * initiated (`++latest`), and a load whose ticket is stale when its `store.load` settles
  * is discarded — without it, a fallback `list()`/`load()` that finishes after a `select`
  * would put the newest conversation back on screen.
  */
-export function createStageSelection({ show }: { show: (conv: Conversation) => void }): StageSelection {
+export function createStageSelection({ show, isRunning }: StageSelectionOptions): StageSelection {
   let store: ConversationStore | null = null;
   let held: string | null = null;
   let heldResolve: ((r: StageSelectionResult) => void) | null = null;
@@ -40,6 +48,9 @@ export function createStageSelection({ show }: { show: (conv: Conversation) => v
   // Guards the fallback: once anything has been shown (select, fallback or adopt), the
   // store opening must not auto-show the newest over it.
   let shown = false;
+  // The conversation the stage is showing, so a re-select of it can be told apart from a
+  // select of a different one (re-tap reloads; a different id is an ordinary load).
+  let currentId: string | null = null;
 
   const attempt = async (id: string, ticket: number): Promise<StageSelectionResult> => {
     const conv = store ? await store.load(id) : null;
@@ -47,6 +58,7 @@ export function createStageSelection({ show }: { show: (conv: Conversation) => v
     if (!conv) return 'missing';
     show(conv);
     shown = true;
+    currentId = id;
     return 'shown';
   };
 
@@ -58,7 +70,15 @@ export function createStageSelection({ show }: { show: (conv: Conversation) => v
         heldResolve = null;
       }
       const ticket = ++latest;
-      if (store) return attempt(id, ticket);
+      if (store) {
+        // Re-tapping the conversation already shown is a repair gesture: reload it so the
+        // stage re-reads the store and re-renders. But while a run is in flight for it, a
+        // stray tap must not discard the live work — ignore it (it stays shown).
+        if (id === currentId && isRunning()) {
+          return Promise.resolve('shown');
+        }
+        return attempt(id, ticket);
+      }
       held = id;
       return new Promise<StageSelectionResult>((resolve) => {
         heldResolve = resolve;
@@ -92,6 +112,7 @@ export function createStageSelection({ show }: { show: (conv: Conversation) => v
       held = null;
       latest++; // slice out any in-flight load's (late) result
       shown = true;
+      currentId = conv.id;
       show(conv);
     },
   };
