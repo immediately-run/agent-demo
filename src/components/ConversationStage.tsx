@@ -76,7 +76,14 @@ export default function ConversationStage() {
   // up — resuming only on return. Two scrollers, one hook, called twice.
   const logRef = useRef<HTMLUListElement>(null);
   const reasoningRef = useRef<HTMLSpanElement>(null);
-  useStickToBottom(logRef, log);
+  // The transcript scroller follows everything that grows inside it — the settled rows,
+  // the live reasoning block and the live reply — so it is keyed on all three, not just
+  // the settled rows (the live rows stream without touching `log`).
+  const transcriptFlow = useMemo(
+    () => [log, thinking, streaming],
+    [log, thinking, streaming],
+  );
+  useStickToBottom(logRef, transcriptFlow);
   useStickToBottom(reasoningRef, thinking);
 
   // The STAGE app's working tree, conferred by the host as a `type:'worktree'` mount

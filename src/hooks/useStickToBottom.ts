@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { RefObject } from "react";
 
 import {
@@ -20,9 +20,17 @@ export function useStickToBottom(
   value: unknown,
 ): void {
   const stateRef = useRef<FollowState>("follow");
+  const elementRef = useRef<HTMLElement | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollerRef.current;
+
+    // A new scroller element starts following again — the reasoning box remounts for
+    // each fresh block, and a release from a previous box must not leak into this one.
+    if (el !== elementRef.current) {
+      elementRef.current = el;
+      stateRef.current = "follow";
+    }
     if (!el) return;
 
     // Follow new content: a following reader is carried to the new bottom.

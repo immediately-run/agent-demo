@@ -260,7 +260,6 @@
 @media (prefers-reduced-motion: reduce) {
   .ca-thinking-dot {
     animation: none;
-    opacity: 1;
   }
 }
 .ca-reasoning-body {
