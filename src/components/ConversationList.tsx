@@ -52,15 +52,18 @@ export default function ConversationList() {
   // The selection the stage should show: the user's explicit choice while it is
   // still in scope, else the newest in-scope conversation (so the stage isn't
   // blank, and a repo switch or delete re-lands somewhere sensible). DERIVED, not
-  // set from an effect — there is one writer (`setSelected`, gesture handlers) and
-  // one announcer (the posting effect below).
+  // set from an effect — there is one writer (`setSelected`, gesture handlers),
+  // while the announcements come from both a gesture post (`openConversation`,
+  // so a re-tap of the selected row still lands) and the derived-change effect below.
   const effectiveSelected = useMemo(() => {
     if (selected && mine.some((c) => c.id === selected)) return selected;
     return mine[0]?.id ?? null;
   }, [selected, mine]);
 
-  // Announce the selection to the stage whenever it changes — a user's tap and the
-  // bookkeeping fallback go through the same single post, so the two can't race.
+  // Announce a DERIVED selection change to the stage — the bookkeeping fallback (first
+  // row on load, next after a delete/scope change). A user's tap is announced directly
+  // by `openConversation` instead, so a re-tap of the already-selected row — which does
+  // not change `effectiveSelected` and so skips this effect — still posts (R3-616).
   useEffect(() => {
     if (!effectiveSelected) return;
     void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
