@@ -374,7 +374,7 @@ export default function ConversationStage() {
   }, []);
 
   return (
-    <div className="ca">
+    <div className="ca ca--stage">
       <header className="ca-hd">
         <span className="ca-title">{title || "Conversation"}</span>
         <span className="ca-sub">

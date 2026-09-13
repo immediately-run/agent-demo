@@ -4,14 +4,17 @@
   gap: 10px;
   padding: 16px;
   border-bottom: 1px solid var(--border, #2a2a2a);
-  /* Fill the host region so `.ca-log` below is the element that scrolls, not the whole
-     region. The host mounts the app into a bare #root with no definite height, so a
-     `height: 100%` here would compute to auto; a viewport unit resolves against the
-     iframe's own region-scaled viewport instead. */
-  height: 100dvh;
-  /* Lets the flex children (`.ca-log`) actually shrink below their content height and
-     scroll rather than forcing `.ca` taller than the region. */
+  /* Lets the flex children (`.ca-log`) shrink below their content height and scroll once
+     the container has a definite height — provided by `.ca--stage` below for the stage. */
   min-height: 0;
+}
+/* The stage transcript fills the host region so `.ca-log` is the element that scrolls,
+   not the whole region. A viewport unit resolves against the iframe's region-scaled
+   viewport (the host mounts into a bare #root, so `height: 100%` would compute to auto).
+   Scoped to the stage root: the region-less standalone CodingAgent stays auto-height — a
+   `100dvh` there would pump the host's auto-resize protocol into a growth loop. */
+.ca--stage {
+  height: 100dvh;
 }
 .ca-hd {
   display: flex;
