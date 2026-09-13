@@ -26,10 +26,11 @@ export interface StageSelection {
 
 export interface StageSelectionOptions {
   show: (conv: Conversation) => void;
-  /** Whether a run is in flight for the conversation the stage is showing. A re-select
-   * of the shown conversation is a repair gesture (reload it) — unless a run holds it,
-   * in which case the tap is ignored so in-flight work is never discarded. */
-  isRunning: () => boolean;
+  /** Whether a run is in flight for the given conversation. A re-select of the shown
+   * conversation is a repair gesture (reload it) — unless a run is in flight for *that
+   * same* conversation, in which case the tap is ignored so in-flight work is never
+   * discarded. A run for a different conversation does not gate the reload. */
+  isRunning: (id: string) => boolean;
 }
 
 /**
@@ -72,9 +73,9 @@ export function createStageSelection({ show, isRunning }: StageSelectionOptions)
       const ticket = ++latest;
       if (store) {
         // Re-tapping the conversation already shown is a repair gesture: reload it so the
-        // stage re-reads the store and re-renders. But while a run is in flight for it, a
-        // stray tap must not discard the live work — ignore it (it stays shown).
-        if (id === currentId && isRunning()) {
+        // stage re-reads the store and re-renders. But while a run is in flight for *that
+        // same* conversation, a stray tap must not discard the live work — ignore it.
+        if (id === currentId && isRunning(id)) {
           return Promise.resolve('shown');
         }
         return attempt(id, ticket);

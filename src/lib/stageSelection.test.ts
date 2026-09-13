@@ -268,4 +268,20 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     await expect(stage.select(b.id)).resolves.toBe('shown');
     expect(show).toHaveBeenCalledWith(shownOf(b.id));
   });
+
+  it("re-loads the shown conversation while a run is in flight for a *different* conversation (R3-616)", async () => {
+    const fs = new MemFs();
+    const store = createConversationStore({ root: '/settings', fs });
+    const a = await store.create('a', REPO);
+
+    const show = vi.fn();
+    // A run is in flight for some other conversation, not `a`.
+    const stage = createStageSelection({ show, isRunning: (id) => id === 'other-run' });
+    await stage.storeOpened(store, REPO); // shows `a`
+    show.mockClear();
+
+    await expect(stage.select(a.id)).resolves.toBe('shown');
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(shownOf(a.id));
+  });
 });

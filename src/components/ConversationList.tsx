@@ -15,7 +15,7 @@ import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@imme
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations } from "../lib/conversationScope";
-import { STAGE_REGION, isUpdated, isRequestSelection } from "../lib/conversationIpc";
+import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
 
@@ -63,7 +63,7 @@ export default function ConversationList() {
   // bookkeeping fallback go through the same single post, so the two can't race.
   useEffect(() => {
     if (!effectiveSelected) return;
-    void postToRegion(STAGE_REGION, { type: "select-conversation", id: effectiveSelected }).catch(() => {});
+    void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
   }, [effectiveSelected]);
 
   // The current selection, readable from the IPC listener without re-subscribing it
@@ -88,7 +88,7 @@ export default function ConversationList() {
     // A tap is an event, not a state transition: announce it directly (R3-616) so a tap
     // on the already-selected row still posts — the derived-value effect above only fires
     // when `effectiveSelected` changes, so the re-tap case was previously silent.
-    void postToRegion(STAGE_REGION, { type: "select-conversation", id }).catch(() => {});
+    void postToRegion(STAGE_REGION, selectMessage(id)).catch(() => {});
     void revealRegion(STAGE_REGION).catch(() => {});
   }, []);
 
@@ -137,10 +137,7 @@ export default function ConversationList() {
       // Answering here is what makes tapping an OLDER conversation land on that one
       // rather than on the newest.
       else if (isRequestSelection(m.data) && selectedRef.current) {
-        void postToRegion(STAGE_REGION, {
-          type: "select-conversation",
-          id: selectedRef.current,
-        }).catch(() => {});
+        void postToRegion(STAGE_REGION, selectMessage(selectedRef.current)).catch(() => {});
       }
     });
     const onFocus = () => void refresh();
