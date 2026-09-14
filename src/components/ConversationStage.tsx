@@ -215,7 +215,16 @@ export default function ConversationStage() {
     );
     void openSessionProjectionWriter()
       .then((w) => {
-        if (live) projectionRef.current = w;
+        if (live) {
+          projectionRef.current = w;
+          // Catch-up: the store's open and the writer's open are independent
+          // round-trips — if the stage already showed a conversation while this
+          // was in flight, that onShow found no writer and dropped its heartbeat
+          // (fail-closed, but the projection should not depend on open order).
+          // Re-publishes current state once; per-id running gate; a null conv
+          // publishes the harmless explicit-inactive doc.
+          publisherRef.current?.onShow();
+        }
       })
       .catch((e) => {
         // No projection ⇒ the host never offers a transcript ⇒ fail-closed.

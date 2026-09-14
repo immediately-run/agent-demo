@@ -7,10 +7,11 @@
 // The host reads the doc from the settings backend it fronts and applies its own
 // heartbeat TTL; a stale or missing doc reads as NO active session (fail-closed).
 //
-// Gate facts only (R-CT-1): repo, conversationId, messageCount, running,
-// heartbeatAt. No transcript bytes ever cross here — the conversation record stays
-// in the conversations/ store, which the host can also read host-side at opt-in
-// time (spec R-CT-4: the projection is display input, not authority).
+// Gate facts only (R-CT-1): repo, conversationId, messageCount, updatedAt,
+// running, heartbeatAt. No transcript bytes ever cross here — the conversation
+// record stays in the conversations/ store, which the host can also read
+// host-side at opt-in time (spec R-CT-4: the projection is display input, not
+// authority).
 import fs from 'fs';
 import { openSettings } from '@immediately-run/sdk';
 import type { StoreFs } from './conversationStore';
