@@ -31,9 +31,14 @@ export interface SessionProjectionDoc {
   conversationId?: string;
   /** 0 when inactive. */
   messageCount: number;
+  /** The conversation record's own `updatedAt` — the save-time fact the spec's
+   *  R-CT-1 enumerates. Distinct from `heartbeatAt`: a save bumps both, a
+   *  close/unmount bumps only the heartbeat. */
+  updatedAt?: number;
   running: boolean;
-  /** ms since epoch, bumped on every publish. The HOST's TTL over this field is
-   *  the staleness bound — the writer never decides freshness. */
+  /** ms since epoch, bumped on EVERY publish (including inactive ones). The
+   *  HOST's TTL over this field is the staleness bound — the writer never
+   *  decides freshness. */
   heartbeatAt: number;
 }
 
@@ -64,8 +69,56 @@ export function deriveSessionProjection(
     repo: conv.repo,
     conversationId: conv.id,
     messageCount: conv.messages.length,
+    updatedAt: conv.updatedAt,
     running,
     heartbeatAt: now,
+  };
+}
+
+/**
+ * The stage-side trigger semantics (R3-631), extracted from the component for the
+ * same reason `stageSelection.ts` was: vitest runs in node with no DOM, so the
+ * naming of WHEN a heartbeat fires is testable only out here. The component owns
+ * the state; this owns the moments.
+ */
+export interface ProjectionPublisher {
+  /** A conversation became the shown one (selection, adopt, newest-fallback).
+   *  Running is true only if the in-flight run belongs to THIS conversation. */
+  onShow(): void;
+  /** A run started for the conversation with this id. */
+  onRunStart(convId: string | null): void;
+  /** The post-turn save landed — the natural heartbeat. */
+  onSaved(): void;
+  /** The run's finally — the running flag clears. */
+  onRunEnd(): void;
+  /** The stage unmounts — explicit inactive doc, best effort (the host's TTL
+   *  backstops a write that loses the teardown race). */
+  onUnmount(): void;
+}
+
+/**
+ * Build the publisher over ref-style accessors. `writer` returning null/undefined
+ * (not opened yet, or open failed) makes every trigger a no-op — fail-closed
+ * silence, not an error surface: the host simply never sees a heartbeat.
+ */
+export function createProjectionPublisher(
+  writer: () => SessionProjectionWriter | null | undefined,
+  state: () => { conv: Conversation | null; runningId: string | null },
+): ProjectionPublisher {
+  const beat = (running: (conv: Conversation) => boolean) => {
+    const w = writer();
+    if (!w) return;
+    const { conv } = state();
+    void w.publish(conv, conv !== null && running(conv));
+  };
+  return {
+    onShow: () => beat((c) => state().runningId === c.id),
+    onRunStart: (convId) => beat((c) => c.id === convId),
+    onSaved: () => beat(() => false),
+    onRunEnd: () => beat(() => false),
+    onUnmount: () => {
+      void writer()?.publish(null, false);
+    },
   };
 }
 
@@ -88,10 +141,12 @@ export function createSessionProjectionWriter(opts: {
       const doc = deriveSessionProjection(conv, running, Date.now());
       try {
         await opts.fs.writeFile(path, JSON.stringify(doc));
-      } catch {
+      } catch (e) {
         // Fail-closed for the FEATURE, not the app: a missed heartbeat expires the
-        // projection host-side. Surfacing this would error the chat for a side
-        // channel the conversation does not depend on.
+        // projection host-side. Logged-and-dropped (implementation standards R3) —
+        // a persistent fault must be visible somewhere, just never on the chat
+        // surface.
+        console.warn(`session projection write failed at ${path} (the host TTL will expire it)`, e);
       }
     },
   };
