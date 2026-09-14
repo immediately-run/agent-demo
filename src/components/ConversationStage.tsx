@@ -25,6 +25,12 @@ import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
+import {
+  openSessionProjectionWriter,
+  createProjectionPublisher,
+  type SessionProjectionWriter,
+  type ProjectionPublisher,
+} from "../lib/sessionProjection";
 import { createStageSelection, type StageSelection } from "../lib/stageSelection";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import type { Conversation } from "../lib/conversationModel";
@@ -39,6 +45,14 @@ export default function ConversationStage() {
   const mounts = useMounts();
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
+  // R3-631 — the session projection (CONTRIBUTE_TRANSCRIPT_SPEC §3): the writer and
+  // the named-heartbeat publisher over it. Opened/built beside the store on the
+  // SAME settings mount; a dead writer costs only the feature (the host never sees
+  // a heartbeat ⇒ never offers ⇒ fail-closed), never the conversation. The trigger
+  // semantics live in `sessionProjection.ts` (extracted like `stageSelection.ts`
+  // so they are testable without a DOM); this component only names the moments.
+  const projectionRef = useRef<SessionProjectionWriter | null>(null);
+  const publisherRef = useRef<ProjectionPublisher | null>(null);
   // R3-224 (§3.3): the stop button's abort controller for the in-flight run. Aborting
   // it halts the loop AND tears down the in-flight upstream LLM request (stops billing).
   const abortRef = useRef<AbortController | null>(null);
@@ -132,6 +146,7 @@ export default function ConversationStage() {
     setTitle(conv.title);
     setLog(messagesToLog(conv.messages));
     setStreaming("");
+    publisherRef.current?.onShow();
   }, []);
 
   // One arbiter per mount (never module scope): it holds the held selection and the
@@ -189,8 +204,40 @@ export default function ConversationStage() {
         if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones"));
       }
     })();
+    // R3-631 — open the projection writer on the same mount, independently: a
+    // store that fails while the writer opens (or vice versa) degrades exactly one
+    // of the two surfaces. The publisher is built here (not during render) so no
+    // ref-carrying function reaches a render path.
+    projectionRef.current = null;
+    publisherRef.current = createProjectionPublisher(
+      () => projectionRef.current,
+      () => ({ conv: convRef.current, runningId: runningIdRef.current }),
+    );
+    void openSessionProjectionWriter()
+      .then((w) => {
+        if (live) {
+          projectionRef.current = w;
+          // Catch-up: the store's open and the writer's open are independent
+          // round-trips — if the stage already showed a conversation while this
+          // was in flight, that onShow found no writer and dropped its heartbeat
+          // (fail-closed, but the projection should not depend on open order).
+          // Re-publishes current state once; per-id running gate; a null conv
+          // publishes the harmless explicit-inactive doc.
+          publisherRef.current?.onShow();
+        }
+      })
+      .catch((e) => {
+        // No projection ⇒ the host never offers a transcript ⇒ fail-closed.
+        // Logged-and-dropped (R3): a persistent fault should be visible somewhere.
+        console.warn('session projection writer unavailable (transcript offers stay off)', e);
+      });
     return () => {
       live = false;
+      // Unmount ⇒ explicit inactive doc (best-effort; if the write loses the race
+      // with teardown, the host's TTL expires the last heartbeat instead).
+      publisherRef.current?.onUnmount();
+      publisherRef.current = null;
+      projectionRef.current = null;
     };
   }, []);
 
@@ -256,6 +303,7 @@ export default function ConversationStage() {
     setPrompt("");
     setRunning(true);
     runningIdRef.current = conv?.id ?? null;
+    publisherRef.current?.onRunStart(conv?.id ?? null);
     setStreaming("");
     setThinking("");
     setUsage(null);
@@ -339,6 +387,8 @@ export default function ConversationStage() {
           });
           setTitle(newTitle);
           setStoreError(null);
+          // R3-631 — the save is the natural heartbeat: messageCount grew.
+          publisherRef.current?.onSaved();
           void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
         } catch (e) {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
@@ -359,6 +409,7 @@ export default function ConversationStage() {
       setRunning(false);
       runningIdRef.current = null;
       abortRef.current = null;
+      publisherRef.current?.onRunEnd();
     }
   };
 
