@@ -20,7 +20,7 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
-import { runAgent } from "../lib/agentLoop";
+import { runAgent, type LoopBoundary } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
@@ -107,6 +107,18 @@ export default function CodingAgent() {
     append({ kind: "user", text: prompt });
     const controller = new AbortController();
     abortRef.current = controller;
+    // R3-559: the conversation must exist BEFORE the run starts — the checkpoint
+    // journal appends into it from the first boundary (B0), so a fresh run creates
+    // its record up-front rather than at persist time.
+    const store = storeRef.current;
+    if (store && !convRef.current) {
+      try {
+        convRef.current = await store.create();
+      } catch {
+        /* journalless + recordless — degrade to ephemeral, as before */
+      }
+    }
+    const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
@@ -120,6 +132,16 @@ export default function CodingAgent() {
         // (R3-220): the resolved provider's window drives when to compact.
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
+          // R3-559: append every boundary to the conversation's journal (B2
+          // intent is durable before its executor runs — R-ARD-10a). The loop
+          // awaits this; a failed append unwinds the run at that boundary.
+          ...(journalConv
+            ? {
+                onBoundary: async (b: LoopBoundary) => {
+                  await store!.append(journalConv.id, b);
+                },
+              }
+            : {}),
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           // R3-335 — the live thinking surface. Now that compaction lets a task run past
           // a dozen turns, the silent stretches are longer, and "is it stuck or
@@ -159,14 +181,18 @@ export default function CodingAgent() {
   // R3-224 (§3.3): abort the in-flight run — the loop AND the upstream LLM request.
   const stop = () => abortRef.current?.abort();
 
-  // Save the run into its conversation (best-effort; no-op without a store).
+  // Save the run into its conversation — a FOLD when the journal tier is wired
+  // (R3-559: stamps the fold watermark + carried run-state, reclaims the
+  // superseded entries), a plain save otherwise. Best-effort; no-op without a store.
   const persist = async (messages: Conversation["messages"]) => {
     const store = storeRef.current;
     if (!store) return;
     try {
       const conv = convRef.current ?? (await store.create());
       const title = conv.title === "New conversation" ? deriveTitle(messages) : conv.title;
-      convRef.current = await store.save({ ...conv, title, messages });
+      convRef.current = store.hasJournal()
+        ? await store.fold(conv.id, { messages, title })
+        : await store.save({ ...conv, title, messages });
     } catch {
       /* persistence is best-effort — never break the run on a write failure */
     }

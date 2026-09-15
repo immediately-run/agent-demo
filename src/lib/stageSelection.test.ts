@@ -29,7 +29,7 @@ afterEach(() => {
 describe('createStageSelection (plan 05 / R3-594)', () => {
   it('a selection that precedes the store shows that conversation, never the newest', async () => {
     vi.useFakeTimers();
-    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
     vi.setSystemTime(1000);
     const older = await store.create('older', REPO);
     vi.setSystemTime(2000);
@@ -48,7 +48,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it('with no selection, the store shows the newest in scope, never another repo', async () => {
     vi.useFakeTimers();
-    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
     vi.setSystemTime(1000);
     await store.create('mine-older', REPO);
     vi.setSystemTime(3000);
@@ -68,7 +68,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   it('a select during the fallback load wins, and the fallback resolves superseded', async () => {
     vi.useFakeTimers();
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     vi.setSystemTime(1000);
     const older = await store.create('older', REPO);
     vi.setSystemTime(2000);
@@ -97,7 +97,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   });
 
   it('two selections resolve to the later one even when the first load finishes last', async () => {
-    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
     const show = vi.fn();
     const stage = createStageSelection({ show, isRunning: idle });
     await stage.storeOpened(store, REPO); // empty → fallback shows nothing
@@ -123,7 +123,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   it('adopting a new conversation discards an in-flight fallback', async () => {
     vi.useFakeTimers();
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     vi.setSystemTime(1000);
     const newest = await store.create('newest', REPO);
 
@@ -153,7 +153,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   });
 
   it("selecting a deleted conversation resolves 'missing' and shows nothing", async () => {
-    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
     const show = vi.fn();
     const stage = createStageSelection({ show, isRunning: idle });
     await stage.storeOpened(store, REPO); // empty → fallback shows nothing
@@ -163,7 +163,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   });
 
   it("the store opening after an adoption does not replace it (shown guard)", async () => {
-    const store = createConversationStore({ root: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
     const show = vi.fn();
     const stage = createStageSelection({ show, isRunning: idle });
 
@@ -184,7 +184,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it('a second selection made while the store is still closed supersedes the first', async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     const older = await store.create('older', REPO);
     const newer = await store.create('newer', REPO);
 
@@ -203,7 +203,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it('adopting while a selection is still held supersedes that selection', async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     const held = await store.create('held', REPO);
 
     const show = vi.fn();
@@ -227,7 +227,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("re-loads the shown conversation on a re-select when idle (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     const a = await store.create('a', REPO);
 
     const show = vi.fn();
@@ -242,7 +242,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("ignores a re-select of the shown conversation while a run is in flight (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     const a = await store.create('a', REPO);
 
     const show = vi.fn();
@@ -256,7 +256,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("selecting a different conversation while a run is in flight still loads it (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     await store.create('a', REPO); // the shown conversation
 
     const show = vi.fn();
@@ -271,7 +271,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("re-loads the shown conversation while a run is in flight for a *different* conversation (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
     const a = await store.create('a', REPO);
 
     const show = vi.fn();
@@ -287,7 +287,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("ignores a re-select of the adopted conversation while its run is in flight (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
 
     const show = vi.fn();
     let adoptedId = '';
@@ -304,7 +304,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
   it("re-loads the adopted conversation on a re-select when idle (R3-616)", async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ root: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs });
 
     const show = vi.fn();
     const stage = createStageSelection({ show, isRunning: idle });
