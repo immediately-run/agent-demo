@@ -27,13 +27,21 @@ import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import "./CodingAgent.css";
 
+/** R-ARD-10: the row for a run that cannot be persisted at all (no store — no
+ *  host / signed out / settings mount dead). One copy: the mount effect and the
+ *  run-start re-check both use it, so the copy cannot drift. */
+const noStoreRow = (e: unknown): LogEntry => ({
+  kind: "error",
+  text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
+});
+
 export default function CodingAgent() {
   const catalog = useCatalog();
   const mounts = useMounts();
   const [prompt, setPrompt] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState("");
-  // R3-335 — the in-flight reasoning for the current turn (cleared when the whole block
+  // R3-335 — the in-flight reasoning for the current block (cleared when the whole block
   // arrives and becomes a transcript row).
   const [thinking, setThinking] = useState("");
   const [running, setRunning] = useState(false);
@@ -43,6 +51,9 @@ export default function CodingAgent() {
   // failure degrades to today's ephemeral behavior rather than crashing.
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
+  // R-ARD-10: why the store is absent, when it is — the run-start re-check needs
+  // it after `setLog([])` wipes the mount-time row.
+  const storeOpenErrorRef = useRef<unknown>(null);
   // R3-224 (§3.3): the stop button's abort controller for the in-flight run.
   const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -60,13 +71,9 @@ export default function CodingAgent() {
       } catch (e) {
         // R-ARD-10: no store at all (no host / signed out / settings mount dead)
         // means a fully ephemeral run — allowed, but never a silent downgrade.
-        // (`append` is declared below this effect; the setter is equivalent here.)
         if (live) {
-          const row: LogEntry = {
-            kind: "error",
-            text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
-          };
-          setLog((l) => [...l, row]);
+          storeOpenErrorRef.current = e;
+          setLog((l) => [...l, noStoreRow(e)]);
         }
       }
     })();
@@ -111,6 +118,11 @@ export default function CodingAgent() {
     if (!prompt.trim() || running) return;
     setRunning(true);
     setLog([]);
+    // R-ARD-10: the mount-time no-store row was just wiped by setLog([]) above —
+    // an ephemeral run must SAY it is ephemeral on every run, not only at mount.
+    if (!storeRef.current && storeOpenErrorRef.current !== null) {
+      append(noStoreRow(storeOpenErrorRef.current));
+    }
     setStreaming("");
     setThinking("");
     append({ kind: "user", text: prompt });
@@ -127,10 +139,7 @@ export default function CodingAgent() {
         // R-ARD-10: an un-checkpointable run is allowed to start, and SAYS SO —
         // never a silent downgrade to ephemeral. The run proceeds exactly as the
         // pre-journal agent did; the user is told what that costs.
-        append({
-          kind: "error",
-          text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
-        });
+        append(noStoreRow(e));
       }
     }
     // Same rule for the journal tier: journalless is a degradation the user can

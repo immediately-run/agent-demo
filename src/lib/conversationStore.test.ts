@@ -256,6 +256,12 @@ describe('conversationStore — replay (R-ARD-5 / R-ARD-7a)', () => {
     await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-schema' });
     fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{"seq":2,"kind":"B7","schema":1,"t":1}');
     await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
+    // A KNOWN kind with a MISSING payload is refused too — a silently skipped B5
+    // would replay provider-invalid, a B3 without its result would resolve nothing.
+    fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{"seq":2,"kind":"B3","schema":1,"t":1}');
+    await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
+    fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{"seq":2,"kind":"B5","schema":1,"t":1}');
+    await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
     fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{ not json');
     await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
   });

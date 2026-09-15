@@ -59,10 +59,11 @@ undeclared host and no dead declaration:
 
 ## Recorded findings (code-verification pass, 2026-06)
 
-- **SDK-version skew (record only, do NOT bump):** agent-demo pins
-  `@immediately-run/sdk` at **`^0.12.0`** — the highest pin in the fleet (others
-  on `0.2.8` / `0.8.1`; file-explorer `0.11.0`). Fleet maintenance debt; a
-  coordinated bump is a separate gated change.
+- **SDK-version skew (resolved 2026-09-15):** agent-demo pinned
+  `@immediately-run/sdk` at `^0.12.0` → **`^0.68.0`** by R3-559 (the checkpoint
+  journal needs `openLocalStore()` from R3-558; verified against sdk main and
+  the published 0.68.0). Recorded here because the old "do NOT bump" note is
+  superseded — the coordinated fleet bump remains separate maintenance debt.
 - **Vocabulary:** no `kernel` in comments; "provider" consistently the
   **LLM service-provider** sense (core_concepts §6), not app-identity — no rename
   needed. `main.tsx` carries no app logic/CSS (CLAUDE.md conformant).
