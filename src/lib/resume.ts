@@ -16,12 +16,13 @@
 // `steering.ts`), so `ConversationStage.tsx` stays a thin caller and every rule
 // here is testable without a DOM.
 
-import type { ChatMessage, ContentBlock, ToolUseBlock } from './agentLoop';
+import { TRUNCATED_RESULT_TEXT, type ChatMessage, type ContentBlock, type ToolUseBlock } from './agentLoop';
 import type { PendingEffect, ReplayResult } from './conversationStore';
 
-/** The loop's own truncation wording, reused VERBATIM for the never-issued case
- *  rather than inventing a second phrasing for the same fact (R-ARD-11). */
-export const NOT_EXECUTED_TEXT = 'tool call truncated by the token limit — not executed';
+/** The loop's own truncation wording, reused VERBATIM (imported, not re-typed —
+ *  one home) for the never-issued case rather than inventing a second phrasing
+ *  for the same fact (R-ARD-11). */
+export { TRUNCATED_RESULT_TEXT as NOT_EXECUTED_TEXT };
 
 /** The wording for a call the executor started but whose outcome the journal
  *  does not carry (B2 with no resolving B3). */
@@ -89,7 +90,7 @@ export function repairTranscript(input: RepairInput): RepairResult {
     const content: ContentBlock[] = dangling.map((d) => ({
       type: 'tool_result' as const,
       tool_use_id: d.id,
-      content: d.case === 'started-unknown' ? STARTED_UNKNOWN_TEXT : NOT_EXECUTED_TEXT,
+      content: d.case === 'started-unknown' ? STARTED_UNKNOWN_TEXT : TRUNCATED_RESULT_TEXT,
       is_error: true,
     }));
     messages.push({ role: 'user', content });
@@ -115,12 +116,22 @@ export function interrupted(replay: Pick<ReplayResult, 'pendingEffects' | 'trail
  * The divergence note (R-ARD-16): a checkpoint records the workspace it was
  * authoring, and resume detects that the tree moved underneath it — the model
  * must be TOLD, plainly, rather than left to infer it from failing reads.
- * Returns the note as a user message to prepend to the resumed transcript, or
- * null when the workspace is unchanged (or was never stamped).
+ *
+ * POSITION: APPENDED as the next user turn, not prepended at index 0 — the
+ * deviation from the item's "prepend" wording is deliberate and argued on the
+ * PR: (a) the appended position is the turn the model actually responds to,
+ * where a correction must sit to be read; a note at index 0 is buried under
+ * the entire history; (b) the resumed message prefix must start byte-identically
+ * for the provider's conversation-prefix cache — prepending would void the
+ * whole message-prefix cache, the exact silent cost R-ARD-17 exists to avoid.
+ * Returns the note as a user message to append, or null when the workspace is
+ * unchanged, was never stamped, or is not yet known (`undefined` — the
+ * workspace channel has not settled, so no divergence may be claimed).
  */
 export function divergenceMessage(stamped: string | undefined, current: string | null | undefined): ChatMessage | null {
   if (stamped === undefined) return null;
-  if (current !== undefined && current !== null && stamped === current) return null;
+  if (current === undefined) return null; // not yet settled — never fabricate a divergence
+  if (stamped === current) return null;
   const to = current ?? 'a different workspace (or none)';
   return {
     role: 'user',
@@ -138,8 +149,9 @@ export function divergenceMessage(stamped: string | undefined, current: string |
 
 /**
  * Assemble the messages a resumed run sends: the repaired transcript, with the
- * divergence note (if any) prepended as the next user turn. The note is the
- * FIRST thing the model reads on resume — before it can act on stale memory.
+ * divergence note (if any) APPENDED as the next user turn — the position the
+ * model reads and responds to, and the only position that leaves the cached
+ * message prefix untouched (see `divergenceMessage`).
  */
 export function resumedMessages(repaired: ChatMessage[], divergence: ChatMessage | null): ChatMessage[] {
   return divergence ? [...repaired, divergence] : [...repaired];

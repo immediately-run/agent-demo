@@ -19,7 +19,7 @@ import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { createGitToolset } from "../lib/gitTools";
-import { buildPinnedPrefix, buildLiveSuffix, todayIso } from "../lib/agentPrompt";
+import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent, type RunState } from "../lib/agentLoop";
@@ -161,17 +161,34 @@ export default function ConversationStage() {
     publisherRef.current?.onShow();
     // R3-560: is there an interrupted run on this conversation? Read the JOURNAL
     // (not warm state) and offer the attended choices if so. Read-only — the
-    // boot path executes nothing (G-ARD-4).
+    // boot path executes nothing (G-ARD-4). When interrupted, the transcript
+    // rendered is the REPLAYED one — the record alone is folded through the last
+    // run end and would show a blank/stale view over a live tail (R-ARD-15).
     setPendingResume(null);
     const store = storeRef.current;
     if (store?.hasJournal()) {
       void store
         .replay(conv.id)
         .then((r) => {
-          if (convRef.current?.id === conv.id && interrupted(r)) setPendingResume({ convId: conv.id, replay: r });
+          if (convRef.current?.id !== conv.id || runningIdRef.current !== null) return;
+          if (!interrupted(r)) return;
+          setLog(messagesToLog(r.messages));
+          setPendingResume({ convId: conv.id, replay: r });
         })
-        .catch(() => {
-          /* an unreadable journal leaves the record's view — never blocks showing */
+        .catch((e) => {
+          // R-ARD-14 / §9: a refused journal (corrupt/schema/incoherent) means
+          // the conversation is UN-RESUMABLE — say the resume was withheld,
+          // never silently best-effort it. Other failures are store faults.
+          if (convRef.current?.id !== conv.id) return;
+          const code = (e as { code?: string })?.code ?? '';
+          if (code.startsWith("journal-")) {
+            append({
+              kind: "error",
+              text: "This conversation's checkpoint journal can't be read, so its interrupted run can't be resumed — the saved conversation still opens.",
+            });
+          } else {
+            setStoreError(describe(e, NO_STORE_SUFFIX));
+          }
         });
     }
   }, []);
@@ -293,6 +310,20 @@ export default function ConversationStage() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
+    // R3-560 (R-ARD-15, the attended gate): an interrupted run on THIS
+    // conversation demands a choice first. A fresh kickoff past it would seed
+    // history from the stale record, B0-replace the journal's transcript, and
+    // fold-reclaim the interrupted tail — completed tool results vanishing from
+    // the transcript while their file effects stay, the exact §0 divergence
+    // this item exists to remove. Refuse; the affordance is one row above.
+    if (pendingResume && convRef.current && pendingResume.convId === convRef.current.id) {
+      append({
+        kind: "error",
+        text: "This run was interrupted — choose Resume run, or Keep the files and end the run, before starting a new one.",
+      });
+      return;
+    }
+    setPendingResume(null);
     // Refuse rather than author the wrong tree: with no conferred stage-app working
     // tree, the agent has no filesystem tools, so a "build me X" prompt would either
     // do nothing or (pre-fix) silently edit the agent's own repo. Tell the user.
@@ -362,7 +393,7 @@ export default function ConversationStage() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: pinnedPrefix + "\n\n" + buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills }),
+        system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
         workspace: workspaceRepo ?? undefined,
         systemPrefix: pinnedPrefix,
         history,
@@ -508,6 +539,16 @@ export default function ConversationStage() {
     const pending = pendingResume;
     const conv = convRef.current;
     if (!store || !pending || !conv || running || pending.convId !== conv.id) return;
+    // The same workspace-readiness gate as a fresh Run: a resume authors files
+    // through the conferred stage tree, and without it the loop would run
+    // catalog-only or (pre-R3-569) against the wrong tree. Refuse, say why.
+    if (!stageTree) {
+      append({
+        kind: "error",
+        text: "No app workspace is connected yet. Open an app in the stage (and give it a moment to mount) before resuming — I won't touch my own files.",
+      });
+      return;
+    }
     setPendingResume(null);
     const replay = pending.replay;
     const repaired = repairTranscript({
@@ -515,9 +556,12 @@ export default function ConversationStage() {
       pendingEffects: replay.pendingEffects,
       trailingPartial: replay.trailingPartial,
     });
-    // R-ARD-16: say what moved, in the transcript, before the model works.
+    // R-ARD-16: say what moved, in the transcript, before the model works. An
+    // UNSETTLED workspace channel (undefined) claims nothing — never fabricate
+    // a divergence from an unknown.
     const divergence = divergenceMessage(replay.stampedWorkspace, workspaceRepo);
     const resumed = resumedMessages(repaired.messages, divergence);
+    setLog(messagesToLog(repaired.messages));
     setRunning(true);
     runningIdRef.current = conv.id;
     publisherRef.current?.onRunStart(conv.id);
@@ -539,7 +583,7 @@ export default function ConversationStage() {
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: pinnedPrefix + "\n\n" + buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills }),
+        system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
         workspace: workspaceRepo ?? undefined,
         systemPrefix: pinnedPrefix,
         resume: {
@@ -751,8 +795,7 @@ export default function ConversationStage() {
       {pendingResume && !running && (
         <div className="ca-line ca-error" role="status">
           <span className="ca-err">
-            This run was interrupted after {pendingResume.replay.journalDepth} steps — the conversation
-            continued from its last checkpoint is repairable, and the file changes so far STAY either way.
+            This run was interrupted after {pendingResume.replay.journalDepth} steps. You can resume it from its last checkpoint — either way, the file changes so far stay.
           </span>
           <div className="ca-resume-row">
             <button type="button" className="ca-run" onClick={() => void resumeRun()}>

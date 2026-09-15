@@ -149,6 +149,13 @@ export function buildLiveSuffix(ctx: {
   return sections.join('\n\n');
 }
 
+/** Join a pinned prefix and a live suffix at the cache breakpoint (R-ARD-17).
+ *  The ONE join — callers never hand-concatenate, so the boundary shape cannot
+ *  drift between surfaces. */
+export function composeSystemPrompt(pinned: string, live: string): string {
+  return live ? pinned + '\n\n' + live : pinned;
+}
+
 /**
  * Assemble the system prompt from live context: the pinned prefix (frozen date)
  * followed by the live suffix. Pure + deterministic (no `Date.now`), so it is
@@ -156,14 +163,15 @@ export function buildLiveSuffix(ctx: {
  * split point is a provider cache breakpoint (R-ARD-17).
  */
 export function buildSystemPrompt(ctx: PromptContext): string {
-  const pinned = buildPinnedPrefix({ today: ctx.today });
-  const live = buildLiveSuffix({
-    tools: ctx.tools,
-    ...(ctx.workspaceRoot !== undefined ? { workspaceRoot: ctx.workspaceRoot } : {}),
-    ...(ctx.route !== undefined ? { route: ctx.route } : {}),
-    ...(ctx.skills !== undefined ? { skills: ctx.skills } : {}),
-  });
-  return live ? pinned + '\n\n' + live : pinned;
+  return composeSystemPrompt(
+    buildPinnedPrefix({ today: ctx.today }),
+    buildLiveSuffix({
+      tools: ctx.tools,
+      ...(ctx.workspaceRoot !== undefined ? { workspaceRoot: ctx.workspaceRoot } : {}),
+      ...(ctx.route !== undefined ? { route: ctx.route } : {}),
+      ...(ctx.skills !== undefined ? { skills: ctx.skills } : {}),
+    }),
+  );
 }
 
 /** One-line-clamp a tool description so the generated list stays scannable. */

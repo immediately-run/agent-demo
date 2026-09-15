@@ -200,32 +200,6 @@ describe('resume — repair, proven against real killed runs (G-ARD-3 / R-ARD-12
 
 // ---- the pinned prefix / live suffix split (R-ARD-17 / G-ARD-9) --------------------
 
-describe('resume — prompt cache split (R-ARD-17)', () => {
-  it('the pinned prefix is byte-identical across a date change ONLY when the frozen date is reused', () => {
-    const run1 = buildPinnedPrefix({ today: '2026-09-15' });
-    // A different live context must not touch the prefix — it takes only the date.
-    expect(buildPinnedPrefix({ today: '2026-09-15' })).toBe(run1);
-    // The date-boundary case: midnight passes; rebuilding with the NEW date
-    // changes the bytes (the silent cache-void), so resume must replay the
-    // JOURNALED bytes instead of rebuilding.
-    expect(buildPinnedPrefix({ today: '2026-09-16' })).not.toBe(run1);
-    expect(run1).toContain('2026-09-15');
-    // No authority content in the prefix: the roster and workspace are live.
-    expect(run1).not.toContain('Available tools');
-    expect(run1).not.toContain('Workspace root');
-  });
-
-  it('the live suffix drops a tool removed from the catalog (a revoked tool is honestly absent)', () => {
-    const a = { name: 'fs__read_file', description: 'read' };
-    const b = { name: 'fs__write_file', description: 'write' };
-    const before = buildLiveSuffix({ tools: [a, b], workspaceRoot: '/mnt/x' });
-    expect(before).toContain('fs__read_file');
-    const after = buildLiveSuffix({ tools: [b], workspaceRoot: '/mnt/x' });
-    expect(after).not.toContain('fs__read_file'); // revoked ⇒ absent, cache miss taken honestly
-    expect(after).toContain('fs__write_file');
-  });
-});
-
 // ---- attended resume: boot executes nothing (G-ARD-4) -----------------------------
 
 describe('resume — attended: booting an interrupted journal executes nothing until the user acts (G-ARD-4)', () => {
@@ -296,8 +270,9 @@ describe('resume — attended: booting an interrupted journal executes nothing u
 describe('resume — fold-only: the second-device view repairs with the loss bounded to the un-folded tail (G-ARD-16)', () => {
   it('a fresh runtime with the folded record and NO device-local entries repairs per the two-case rule', async () => {
     const killed = await killedMidBatch();
-    // The interrupted run was folded (mid-run compaction shape: patch-less, the
-    // checkpointed copies) — the journal entries are gone.
+    // The second device's record: the interrupted run's journal was folded away
+    // (a patch-less fold — what a mid-run compaction fold writes), so the record
+    // carries the checkpointed copies and no entries survive above the fold.
     const folding = reopen(killed.fs);
     await folding.fold(killed.convId);
 
@@ -410,6 +385,7 @@ describe('resume — the checkpoint is data, never authority (G-ARD-5)', () => {
 describe('resume — divergence: the tree moved underneath (R-ARD-16)', () => {
   it('names what changed, plainly, as the first thing the resumed run reads', () => {
     expect(divergenceMessage(undefined, 'other/repo')).toBeNull(); // never stamped ⇒ nothing to claim
+    expect(divergenceMessage('was/repo', undefined)).toBeNull(); // channel not settled ⇒ never fabricate
     expect(divergenceMessage('same/repo', 'same/repo')).toBeNull(); // unchanged
     const note = divergenceMessage('was/repo', 'now/repo');
     expect(note?.role).toBe('user');

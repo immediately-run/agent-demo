@@ -513,6 +513,13 @@ export function isContextOverflow(e: unknown): boolean {
   );
 }
 
+/**
+ * The synthesized tool_result content for a truncated call (F3) — and, verbatim,
+ * resume's *not executed* repair wording (R3-560 / R-ARD-11: one phrasing for
+ * one fact, one home). Exported so the repair module cannot re-type it.
+ */
+export const TRUNCATED_RESULT_TEXT = 'tool call truncated by the token limit — not executed';
+
 // The user turn injected when a truncated (`max_tokens`) turn emitted tool calls: we
 // fail the partial calls rather than execute them (F3), and tell the model to retry.
 const TRUNCATED_RETRY_TEXT =
@@ -793,7 +800,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       const failed: ContentBlock[] = toolUses.map((c) => ({
         type: 'tool_result',
         tool_use_id: c.id,
-        content: 'tool call truncated by the token limit — not executed',
+        content: TRUNCATED_RESULT_TEXT,
         is_error: true,
       }));
       failed.push({ type: 'text', text: TRUNCATED_RETRY_TEXT });
