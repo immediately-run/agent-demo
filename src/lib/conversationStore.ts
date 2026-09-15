@@ -75,18 +75,25 @@ export interface JournalEntry {
   effectId?: string;
   /** B0 / B6: the full message array (kickoff identity / post-compaction fold). */
   messages?: ChatMessage[];
-  /** B1: the assistant turn's finalized blocks. */
+  /** B1: the assistant turn's finalized blocks (a `partial: true` turn is one an
+   *  `interrupt` steer cut short — R3-560's repair discards it when trailing). */
   blocks?: ContentBlock[];
+  partial?: boolean;
   /** B2: the tool_use block about to be executed (marked started). */
   call?: ToolUseBlock;
   /** B3: one completed call's tool_result. */
   result?: ToolResultBlock;
   /** B3: the images this call produced (they ride with the results message). */
   images?: ImageBlock[];
-  /** B4: the loop's carried accounting. */
+  /** B4: the loop's carried accounting (`runEnd: true` marks a clean finish). */
   runState?: RunState;
+  runEnd?: true;
   /** B5: the injected user turn (steer, nudge, truncation retry). */
   message?: ChatMessage;
+  /** B0 (R3-560, R-ARD-16): the workspace label the run authored. */
+  workspace?: string;
+  /** B0 (R3-560, R-ARD-17): the pinned system-prompt prefix bytes. */
+  systemPrefix?: string;
   /** Reserved (R-ARD-22, §8): present in the shape from day one, written by nobody. */
   taint?: never;
 }
@@ -112,6 +119,19 @@ export interface ReplayResult {
   lastSeq: number;
   /** B2 intents with no completing B3 (dangling calls). */
   pendingEffects: PendingEffect[];
+  /** R3-560: the last applied entry was a `partial` B1 — the trailing
+   *  half-finished assistant turn repair must DISCARD, not complete. */
+  trailingPartial: boolean;
+  /** R3-560: how many entries were applied above the fold (0 ⇒ no journal
+   *  evidence — a finished conversation whose entries were folded away). */
+  journalDepth: number;
+  /** R3-560: the last applied entry was the final `runEnd` B4 — the run finished
+   *  cleanly, nothing to resume. */
+  runEnded: boolean;
+  /** R3-560 (R-ARD-16): the workspace label the (latest) B0 stamped, if any. */
+  stampedWorkspace?: string;
+  /** R3-560 (R-ARD-17): the pinned system-prompt prefix bytes from B0, if any. */
+  systemPrefix?: string;
 }
 
 export interface ConversationStore {
@@ -346,6 +366,12 @@ export function createConversationStore(opts: {
     let runState: RunState | null = record?.runState ?? null;
     let lastSeqApplied = foldedSeq;
     const pending = new Map<string, PendingEffect>();
+    // R3-560: the interruption/identity facts the repair path reads.
+    let trailingPartial = false;
+    let runEnded = false;
+    let journalDepth = 0;
+    let stampedWorkspace: string | undefined;
+    let systemPrefix: string | undefined;
     // The results message in assembly: results and images are collected separately
     // so the assembled message keeps the loop's `[...results, ...images]` order.
     let results: ToolResultBlock[] | null = null;
@@ -356,8 +382,20 @@ export function createConversationStore(opts: {
       results = null;
       images = [];
     };
+    // R3-560 (G-ARD-5): seq must be CONTIGUOUS above the fold. Appends mint
+    // sequentially and each write settles before the next boundary, so a gap is
+    // a torn or tampered journal — fail closed, never a best-effort partial
+    // replay of an incoherent record (R-ARD-14).
+    let expectedSeq = foldedSeq;
     for (const e of entries) {
       if (e.seq <= foldedSeq) continue; // already folded into the record — harmless
+      expectedSeq += 1;
+      if (e.seq !== expectedSeq) {
+        throw errWithCode(
+          'journal-corrupt',
+          `journal seq incoherent above the fold: expected ${expectedSeq}, found ${e.seq}`,
+        );
+      }
       // Fail closed on a known kind with a missing payload, for the same reason
       // the unknown-kind default refuses: a silently skipped B5 yields
       // provider-invalid consecutive assistant messages, a B0/B6 without its
@@ -376,22 +414,28 @@ export function createConversationStore(opts: {
           case 'B5':
             return e.message === undefined ? 'message' : null;
           default:
-            return null; // B4 carries no required payload; unknown kinds refused above
+            return null; // B4 carries no required payload; unknown kinds refused below
         }
       })();
       if (missing) {
         throw errWithCode('journal-corrupt', `journal entry ${e.seq} (${e.kind}) is missing its ${missing} payload`);
       }
+      trailingPartial = false;
+      runEnded = false;
+      journalDepth += 1;
       switch (e.kind) {
         case 'B0':
           closeBatch();
           // Kickoff REPLACES: the entry carries the run's full initial array
           // (history + prompt), and the record may hold an older or empty prefix.
           messages = [...(e.messages ?? [])];
+          stampedWorkspace = e.workspace ?? stampedWorkspace;
+          systemPrefix = e.systemPrefix ?? systemPrefix;
           break;
         case 'B1':
           closeBatch();
           messages.push({ role: 'assistant', content: [...(e.blocks ?? [])] });
+          trailingPartial = e.partial === true;
           break;
         case 'B2':
           // B2 does NOT close the batch in assembly: the loop interleaves
@@ -413,6 +457,7 @@ export function createConversationStore(opts: {
         }
         case 'B4':
           runState = e.runState ?? runState;
+          runEnded = e.runEnd === true;
           break;
         case 'B5':
           closeBatch();
@@ -433,7 +478,32 @@ export function createConversationStore(opts: {
       lastSeqApplied = Math.max(lastSeqApplied, e.seq);
     }
     closeBatch();
-    return { messages, runState, foldedSeq, lastSeq: lastSeqApplied, pendingEffects: [...pending.values()] };
+    // R3-560 (G-ARD-5, R-ARD-14): a tool_result for a call never issued — no
+    // `tool_use` with that id anywhere in the assembled transcript — is a
+    // hostile or incoherent record, not data to replay. Refuse it.
+    const issuedIds = new Set(
+      messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_use').map((b) => (b as ToolUseBlock).id),
+    );
+    for (const b of messages.flatMap((m) => m.content)) {
+      if (b.type === 'tool_result' && !issuedIds.has(b.tool_use_id)) {
+        throw errWithCode(
+          'journal-corrupt',
+          `journal replays a tool_result for a call never issued (${b.tool_use_id})`,
+        );
+      }
+    }
+    return {
+      messages,
+      runState,
+      foldedSeq,
+      lastSeq: lastSeqApplied,
+      pendingEffects: [...pending.values()],
+      trailingPartial,
+      runEnded,
+      journalDepth,
+      ...(stampedWorkspace !== undefined ? { stampedWorkspace } : {}),
+      ...(systemPrefix !== undefined ? { systemPrefix } : {}),
+    };
   };
 
   const replay = async (id: string): Promise<ReplayResult> =>

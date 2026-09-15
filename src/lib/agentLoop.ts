@@ -105,8 +105,10 @@ export interface RunState {
 export type LoopBoundary =
   /** Kickoff: the seeded history identity + the user's opening prompt (the full
    *  initial array). A run torn down during its FIRST model turn still checkpoints
-   *  the human's own work. */
-  | { kind: 'B0'; t: number; messages: ChatMessage[] }
+   *  the human's own work. R3-560: `workspace` and `systemPrefix` stamp the run's
+   *  identity for divergence detection and byte-identical prefix replay
+   *  (R-ARD-16/17) — additive, absent on pre-560 journals. */
+  | { kind: 'B0'; t: number; messages: ChatMessage[]; workspace?: string; systemPrefix?: string }
   /** One assistant turn, finalized blocks with signatures (a `partial` turn is one
    *  an `interrupt` steer cut short — recorded as what actually happened). */
   | { kind: 'B1'; t: number; blocks: ContentBlock[]; partial?: boolean }
@@ -119,8 +121,11 @@ export type LoopBoundary =
    *  batch torn down partway keeps results 1..k. The journal assembles the
    *  partially-filled results message; the in-memory model has no such shape. */
   | { kind: 'B3'; t: number; effectId: string; result: ToolResultBlock; images?: ImageBlock[] }
-  /** The loop's carried accounting, at the batch boundary and at run end. */
-  | { kind: 'B4'; t: number; runState: RunState }
+  /** The loop's carried accounting, at the batch boundary and at run end. The
+   *  final emission before `return` carries `runEnd: true` — the one stamp that
+   *  distinguishes a cleanly finished run from one torn down right after a batch
+   *  (R3-560's interruption detector reads it). */
+  | { kind: 'B4'; t: number; runState: RunState; runEnd?: true }
   /** An injected user turn: a steer correction, a stall nudge, or the truncation
    *  path's synthetic error results + retry text — provider validity depends on
    *  these being replayed. */
@@ -256,8 +261,11 @@ export interface RunAgentOptions {
   /** Prior turns of this conversation, replayed before the new prompt so a
    *  follow-up has context (the conversation stage seeds this from the store). */
   history?: ChatMessage[];
-  /** The user's instruction that kicks off the loop. */
-  prompt: string;
+  /** The user's instruction that kicks off the loop. OPTIONAL only on the
+   *  resume path (`resume.messages` present) — a fresh run requires it. A resume
+   *  must NOT synthesise a placeholder user turn to fit the fresh-run shape: it
+   *  corrupts the transcript and re-breaks prompt caching (R-ARD-11 / F17). */
+  prompt?: string;
   /** Large safety-stop on model turns (default 100). No longer the primary bound —
    *  a long task is bounded by `tokenBudget` + compaction; this just backstops a
    *  pathological loop the budget/compaction somehow miss. */
@@ -304,7 +312,15 @@ export interface RunAgentOptions {
    *  teardown-and-resume. The journaled B4 `runState` seeds the loop's locals, so
    *  N teardowns cannot spend N × tokenBudget and the anti-stall / truncation
    *  caps do not reset per teardown. */
-  resume?: { runState: RunState };
+  resume?: { runState?: RunState; messages?: ChatMessage[] };
+  /** R3-560 (R-ARD-16): the workspace label this run authors, stamped into B0 so
+   *  a resume can detect the tree moved underneath it. From `useWorkspace()
+   *  .label` — the same single source scoping uses. */
+  workspace?: string;
+  /** R3-560 (R-ARD-17): the PINNED system-prompt prefix bytes, stamped into B0 so
+   *  a resume replays them byte-identically instead of rebuilding (and silently
+   *  voiding the provider prompt cache). */
+  systemPrefix?: string;
   events?: AgentEvents;
 }
 
@@ -544,13 +560,30 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   // exact when editing this function.
   const boundary = (b: LoopBoundary): void | Promise<void> => events?.onBoundary?.(b);
 
-  let messages: ChatMessage[] = [
-    ...(opts.history ?? []),
-    { role: 'user', content: [{ type: 'text', text: prompt }] },
-  ];
+  // R3-560: the resume entry point. A resumed run seeds `messages` from the
+  // repaired transcript and appends NOTHING — no placeholder user turn (the
+  // fresh-run shape below is the only place a prompt turn is minted).
+  if (opts.resume?.messages === undefined && prompt === undefined) {
+    throw new Error('runAgent: prompt is required unless resume.messages is given');
+  }
+  let messages: ChatMessage[] =
+    opts.resume?.messages !== undefined
+      ? [...opts.resume.messages] // defensive copy: the caller's array is not the loop's to mutate
+      : [
+          ...(opts.history ?? []),
+          { role: 'user', content: [{ type: 'text', text: prompt ?? '' }] },
+        ];
   // B0 — kickoff: without it, a run torn down during its FIRST model turn
-  // checkpoints nothing at all, including work the human completed.
-  await boundary({ kind: 'B0', t: now(), messages: snap(messages) });
+  // checkpoints nothing at all, including work the human completed. The
+  // workspace/systemPrefix stamps are the run's identity for a later resume
+  // (R-ARD-16/17).
+  await boundary({
+    kind: 'B0',
+    t: now(),
+    messages: snap(messages),
+    ...(opts.workspace !== undefined ? { workspace: opts.workspace } : {}),
+    ...(opts.systemPrefix !== undefined ? { systemPrefix: opts.systemPrefix } : {}),
+  });
 
   // Consecutive-stall counter: how many times in a row we've nudged a no-tool-call
   // turn. Reset to 0 by any turn that DOES call a tool, so the budget is per stall
@@ -859,7 +892,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
 
   // B4 — run end, on EVERY exit path (stop, budget, maxTurns, genuine finish): the
   // fold consumes this state, and a run that ends cleanly must leave the same
-  // accounting a torn-down one does.
-  await boundary({ kind: 'B4', t: now(), runState: snap(runState()) });
+  // accounting a torn-down one does. `runEnd` marks the clean finish the
+  // interruption detector reads (R3-560).
+  await boundary({ kind: 'B4', t: now(), runState: snap(runState()), runEnd: true });
   return messages;
 }
