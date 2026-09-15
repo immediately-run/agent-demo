@@ -114,9 +114,23 @@ export default function CodingAgent() {
     if (store && !convRef.current) {
       try {
         convRef.current = await store.create();
-      } catch {
-        /* journalless + recordless — degrade to ephemeral, as before */
+      } catch (e) {
+        // R-ARD-10: an un-checkpointable run is allowed to start, and SAYS SO —
+        // never a silent downgrade to ephemeral. The run proceeds exactly as the
+        // pre-journal agent did; the user is told what that costs.
+        append({
+          kind: "error",
+          text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
+        });
       }
+    }
+    // Same rule for the journal tier: journalless is a degradation the user can
+    // see (the conversation still saves at run end; the checkpoint floor is gone).
+    if (store && convRef.current && !store.hasJournal()) {
+      append({
+        kind: "error",
+        text: "Checkpoints are off (no device-local store) — closing this tab loses the in-flight turn; the conversation itself still saves when the run ends.",
+      });
     }
     const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
@@ -163,8 +177,16 @@ export default function CodingAgent() {
           onToolResult: (name, r) =>
             append({ kind: "result", name, content: r.content, isError: r.isError }),
           onNudge: () => append({ kind: "nudge" }),
-          onCompact: ({ summarizedCount }) =>
-            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
+          onCompact: ({ summarizedCount }) => {
+            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` });
+            // R3-559 (R-ARD-9): fold at the compaction boundary, best-effort — the
+            // run-end fold is the authoritative write (see ConversationStage).
+            if (journalConv) {
+              void store!.fold(journalConv.id).catch((e) => {
+                console.warn("mid-run fold at compaction failed (run-end fold still will)", e);
+              });
+            }
+          },
         },
       });
       await persist(transcript);

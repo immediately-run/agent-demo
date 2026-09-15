@@ -201,7 +201,7 @@ export default function ConversationStage() {
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
         // must see, because it costs them conversation memory.
-        if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+        if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
       }
     })();
     // R3-631 — open the projection writer on the same mount, independently: a
@@ -293,7 +293,7 @@ export default function ConversationStage() {
         // Running ephemerally is a real degradation, not a detail: `history`
         // below falls back to [], so the model sees ONLY this prompt and the
         // conversation appears to have no memory. Say so (R3-247).
-        setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+        setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
       }
     }
     // R3-559: the checkpoint journal. When the device-local tier is wired, every
@@ -378,7 +378,7 @@ export default function ConversationStage() {
               cacheReadTokens: u.cacheReadTokens,
               cacheWriteTokens: u.cacheWriteTokens,
             }),
-          onCompact: ({ summarizedCount, cacheReadTokens }) =>
+          onCompact: ({ summarizedCount, cacheReadTokens }) => {
             append({
               kind: "compaction",
               // R3-336: the compaction rewrote the conversation prefix, so the next turn
@@ -388,7 +388,17 @@ export default function ConversationStage() {
               summary:
                 `${summarizedCount} earlier messages summarized` +
                 (cacheReadTokens !== undefined ? ` · ${cacheReadTokens} cached tokens read so far` : ""),
-            }),
+            });
+            // R3-559 (R-ARD-9): compaction is a natural fold point — it rewrote the
+            // transcript prefix anyway. Best-effort mid-run: a failed fold costs the
+            // fold, never the run (the journal retains everything; the run-end fold
+            // is the authoritative write), so it is logged-and-dropped, not thrown.
+            if (journal) {
+              void store!.fold(journal.id).catch((e) => {
+                console.warn("mid-run fold at compaction failed (run-end fold still will)", e);
+              });
+            }
+          },
           onSteer: ({ messages }) => {
             for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
           },
@@ -415,7 +425,7 @@ export default function ConversationStage() {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
           // dead store, one turn later. Never silent (R3-247).
-          setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+          setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
         }
       }
     } catch (e) {

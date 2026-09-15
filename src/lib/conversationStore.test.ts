@@ -247,13 +247,15 @@ describe('conversationStore — replay (R-ARD-5 / R-ARD-7a)', () => {
     expect(JSON.stringify(after.messages)).toBe(JSON.stringify(before.messages));
   });
 
-  it('refuses an entry with an unknown schema LOUDLY, and corrupt JSON too (R-ARD-5d)', async () => {
+  it('refuses an entry with an unknown schema LOUDLY, an unknown kind too, and corrupt JSON as well (R-ARD-5d)', async () => {
     const fs = new MemFs();
     const s = twoTier(fs);
     const conv = await s.create();
     await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
     fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{"seq":2,"kind":"B1","schema":2,"t":1}');
     await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-schema' });
+    fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{"seq":2,"kind":"B7","schema":1,"t":1}');
+    await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
     fs.files.set(`/local/conversations/${conv.id}/journal/2.json`, '{ not json');
     await expect(s.replay(conv.id)).rejects.toMatchObject({ code: 'journal-corrupt' });
   });

@@ -4,7 +4,9 @@
 // directory (capability `settings:app`, baseline). The JOURNAL is the two-tier
 // checkpoint's append tier (AGENT_RUN_DURABILITY_SPEC §4): one immutable JSON
 // entry per loop boundary under the device-local `openLocalStore()` mount
-// (R3-558), folded into the record at run end / compaction / cadence (R-ARD-9).
+// (R3-558), folded into the record at run end and at every compaction (R-ARD-9;
+// the after-N-entries cadence is deliberately unimplemented — N is spec Q3, "a
+// measurement, not a guess").
 //
 // Mirrors `fsTools.ts`: the core is fs-injectable (`createConversationStore`) so
 // tests are hermetic; production resolves both mounts + real `fs.promises`
@@ -142,7 +144,11 @@ export interface ConversationStore {
   /** Fold the journal into the synced record (R-ARD-6/9): stamp the fold
    *  watermark + carried run-state, then reclaim the superseded entries
    *  (R-ARD-5c). `patch.messages`, when given, is the run's authoritative
-   *  transcript (byte-true to what the model saw). Returns the persisted record. */
+   *  transcript (byte-true to what the model saw). A PATCH-LESS fold (the
+   *  compaction-time fold, mid-run) persists the checkpointed copies — which is
+   *  where R-ARD-5b's entry-size truncation is visible by design; the run-end
+   *  fold with `patch.messages` is the fidelity-restoring write. Returns the
+   *  persisted record. */
   fold(convId: string, patch?: { messages?: ChatMessage[]; title?: string; repo?: string }): Promise<Conversation>;
 }
 
@@ -295,18 +301,22 @@ export function createConversationStore(opts: {
 
   const append = async (convId: string, b: LoopBoundary): Promise<number> => {
     if (!journalRoot) throw errWithCode('journal-unavailable', 'no device-local journal mount');
-    const seq = await nextSeq(convId);
-    lastSeq.set(convId, seq);
     const payload = boundEntryPayload(b) as Partial<JournalEntry>;
-    const entry: JournalEntry = { ...payload, seq, kind: b.kind, schema: 1, t: b.t };
-    const path = `${convJournalDir(convId)}/${seq}.json`;
-    await p.mkdir(convJournalDir(convId), { recursive: true });
-    // Bounded write (R-ARD-10a): race the write against a timer; a timeout is a
+    // Bounded write (R-ARD-10a): the WHOLE append path — seq seeding (which may
+    // read the journal dir and, on a cold boot, the record's fold watermark on
+    // the synced tier) plus the file write — races a timer. A timeout is a
     // failure, never a silent hang the run executes past.
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        p.writeFile(path, JSON.stringify(entry)),
+      return await Promise.race([
+        (async (): Promise<number> => {
+          const seq = await nextSeq(convId);
+          lastSeq.set(convId, seq);
+          const entry: JournalEntry = { ...payload, seq, kind: b.kind, schema: 1, t: b.t };
+          await p.mkdir(convJournalDir(convId), { recursive: true });
+          await p.writeFile(`${convJournalDir(convId)}/${seq}.json`, JSON.stringify(entry));
+          return seq;
+        })(),
         new Promise<never>((_, rej) => {
           timer = setTimeout(() => rej(errWithCode('journal-timeout', 'journal append timed out')), APPEND_TIMEOUT_MS);
         }),
@@ -314,7 +324,6 @@ export function createConversationStore(opts: {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
-    return seq;
   };
 
   /** Assemble the partially-filled results message (R-ARD-7a): B3s of one batch
@@ -378,6 +387,13 @@ export function createConversationStore(opts: {
           closeBatch();
           messages = [...(e.messages ?? [])];
           break;
+        default: {
+          // Fail closed on doubt: the schema check refuses an unknown version for
+          // exactly this reason (R-ARD-5d) — an entry silently skipped here would
+          // corrupt replay without a sound, so an unknown KIND is refused too.
+          const kind = (e as { kind?: string }).kind;
+          throw errWithCode('journal-corrupt', `journal entry ${e.seq} has unknown kind ${String(kind)}`);
+        }
       }
       lastSeqApplied = Math.max(lastSeqApplied, e.seq);
     }
