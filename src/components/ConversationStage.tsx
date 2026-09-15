@@ -40,6 +40,12 @@ import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe } from "../lib/storeError";
 import "./CodingAgent.css";
 
+// R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
+// (history not re-sent) and the durability consequence (a closed tab loses the
+// run). One constant so a fourth call site cannot ship the old copy.
+const NO_STORE_SUFFIX =
+  ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn";
+
 export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
@@ -201,7 +207,7 @@ export default function ConversationStage() {
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
         // must see, because it costs them conversation memory.
-        if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+        if (live) setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     })();
     // R3-631 — open the projection writer on the same mount, independently: a
@@ -293,11 +299,21 @@ export default function ConversationStage() {
         // Running ephemerally is a real degradation, not a detail: `history`
         // below falls back to [], so the model sees ONLY this prompt and the
         // conversation appears to have no memory. Say so (R3-247).
-        setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+        setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     }
-    // The model's memory of earlier turns. Empty whenever the store is
-    // unavailable — which is exactly why `storeError` is surfaced above.
+    // R3-559: the checkpoint journal. When the device-local tier is wired, every
+    // loop boundary is appended before the loop proceeds past it (B2 intent is
+    // durable BEFORE its executor runs — R-ARD-10a); an append that fails or
+    // times out unwinds the run AT that boundary with the durability consequence
+    // named, and the journal already written stays resumable. Journalless
+    // (R-ARD-10): the run is allowed to start, save-at-end only.
+    const journal = conv && store?.hasJournal() ? conv : null;
+    if (store && conv && !store.hasJournal() && !storeError) {
+      setStoreError(
+        "Checkpoints are off (no device-local store), so closing this tab loses the run's in-flight turn — the conversation itself still saves when the run ends.",
+      );
+    }
     const history = conv?.messages ?? [];
     const kickoff = prompt;
     setPrompt("");
@@ -329,6 +345,16 @@ export default function ConversationStage() {
         // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
+          // R3-559: append every boundary to the conversation's journal. The loop
+          // awaits this before proceeding — the write's latency IS the
+          // intent-before-execute ordering.
+          ...(journal
+            ? {
+                onBoundary: async (b) => {
+                  await store!.append(journal.id, b);
+                },
+              }
+            : {}),
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           // R3-335 — the live thinking surface. Now that compaction lets a task run past
           // a dozen turns, the silent stretches are longer, and "is it stuck or
@@ -358,7 +384,7 @@ export default function ConversationStage() {
               cacheReadTokens: u.cacheReadTokens,
               cacheWriteTokens: u.cacheWriteTokens,
             }),
-          onCompact: ({ summarizedCount, cacheReadTokens }) =>
+          onCompact: ({ summarizedCount, cacheReadTokens }) => {
             append({
               kind: "compaction",
               // R3-336: the compaction rewrote the conversation prefix, so the next turn
@@ -368,7 +394,17 @@ export default function ConversationStage() {
               summary:
                 `${summarizedCount} earlier messages summarized` +
                 (cacheReadTokens !== undefined ? ` · ${cacheReadTokens} cached tokens read so far` : ""),
-            }),
+            });
+            // R3-559 (R-ARD-9): compaction is a natural fold point — it rewrote the
+            // transcript prefix anyway. Best-effort mid-run: a failed fold costs the
+            // fold, never the run (the journal retains everything; the run-end fold
+            // is the authoritative write), so it is logged-and-dropped, not thrown.
+            if (journal) {
+              void store!.fold(journal.id).catch((e) => {
+                console.warn("mid-run fold at compaction failed (run-end fold still will)", e);
+              });
+            }
+          },
           onSteer: ({ messages }) => {
             for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
           },
@@ -377,12 +413,13 @@ export default function ConversationStage() {
       if (conv && store) {
         const newTitle = conv.title === "New conversation" ? deriveTitle(transcript) : conv.title;
         try {
-          // A legacy (unstamped) conversation gets the repo it is CONTINUED in
-          // (R3-475); one already stamped keeps the repo it started with.
-          convRef.current = await store.save({
-            ...conv,
-            title: newTitle,
+          // R3-559: the run-end save is now a FOLD (R-ARD-9) — the record gets
+          // the authoritative transcript (byte-true to what the model saw), the
+          // fold watermark, and the carried run-state; the superseded journal
+          // entries are reclaimed (R-ARD-5c).
+          convRef.current = await store.fold(conv.id, {
             messages: transcript,
+            title: newTitle,
             repo: conv.repo ?? workspaceRepo,
           });
           setTitle(newTitle);
@@ -394,11 +431,17 @@ export default function ConversationStage() {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
           // dead store, one turn later. Never silent (R3-247).
-          setStoreError(describe(e, ", so each message is sent without the earlier ones"));
+          setStoreError(describe(e, NO_STORE_SUFFIX));
         }
       }
     } catch (e) {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-559 (R-ARD-10a): a failed checkpoint append unwinds the run here. Name
+      // the durability consequence — the run stopped AT a boundary and everything
+      // checkpointed so far survives (the journal stays resumable).
+      if ((e as { code?: string })?.code?.startsWith('journal-')) {
+        setStoreError(describe(e, ", so the run stopped at its last checkpoint — nothing after it was kept"));
+      }
     } finally {
       offSteerChange();
       steerRef.current = null;

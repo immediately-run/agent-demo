@@ -71,6 +71,66 @@ export interface ChatMessage {
   content: ContentBlock[];
 }
 
+// ---- R3-559 checkpoint boundaries (AGENT_RUN_DURABILITY_SPEC §4) -------------------
+//
+// R-ARD-7: every mutation of the loop's `messages` array is a checkpoint boundary and
+// the loop emits exactly one boundary event per mutation. B0–B6 are the CLASSIFICATION
+// of those mutations, not the enumeration that defines them — the invariant is owed by
+// the mutation, which is why `agentLoop.test.ts` proves it structurally (G-ARD-11) and
+// a ninth mutation with no boundary fails CI.
+//
+// R-ARD-8: the loop performs no I/O. It emits; the stage wires `onBoundary` to the
+// journal store. Awaiting the hook's return is backpressure, not I/O: B2 (intent)
+// must be durable BEFORE its executor runs — the load-bearing ordering — so every
+// emission is awaited before the loop proceeds past it.
+
+/** The loop's carried accounting (R-ARD-7b / B4). `spentTokens` gates the
+ *  runaway-cost guard, so losing it per teardown turns a deliberate spend bound
+ *  into none — the whole reason it is checkpointed. */
+export interface RunState {
+  spentTokens: number;
+  contextTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  nudges: number;
+  truncationRetries: number;
+  tokenBudget?: number;
+  contextWindow?: number;
+}
+
+/** One checkpoint boundary (§4.2's table). Every payload is JSON-round-trippable
+ *  (R-ARD-5d, runtime-neutral): the journal is the portable artifact, and this
+ *  property cannot be retrofitted after the format ships. `t` is stamped from the
+ *  injected `now` seam — never an inline `Date.now()` (R-ARD-7c). */
+export type LoopBoundary =
+  /** Kickoff: the seeded history identity + the user's opening prompt (the full
+   *  initial array). A run torn down during its FIRST model turn still checkpoints
+   *  the human's own work. */
+  | { kind: 'B0'; t: number; messages: ChatMessage[] }
+  /** One assistant turn, finalized blocks with signatures (a `partial` turn is one
+   *  an `interrupt` steer cut short — recorded as what actually happened). */
+  | { kind: 'B1'; t: number; blocks: ContentBlock[]; partial?: boolean }
+  /** Tool intent, emitted BEFORE the executor runs: an interrupted call is legible
+   *  as *started, outcome unknown* rather than absent. `effectId` is loop-minted at
+   *  intent time — before any provider id exists — and the B3 resolving it reuses
+   *  it (R-ARD-5e). */
+  | { kind: 'B2'; t: number; effectId: string; call: ToolUseBlock }
+  /** One completed tool call's result — per call, never per batch (R-ARD-7a): a
+   *  batch torn down partway keeps results 1..k. The journal assembles the
+   *  partially-filled results message; the in-memory model has no such shape. */
+  | { kind: 'B3'; t: number; effectId: string; result: ToolResultBlock; images?: ImageBlock[] }
+  /** The loop's carried accounting, at the batch boundary and at run end. */
+  | { kind: 'B4'; t: number; runState: RunState }
+  /** An injected user turn: a steer correction, a stall nudge, or the truncation
+   *  path's synthetic error results + retry text — provider validity depends on
+   *  these being replayed. */
+  | { kind: 'B5'; t: number; message: ChatMessage }
+  /** Transcript replacement: the post-compaction message array (compaction
+   *  replaces `messages` wholesale; an append-only journal cannot express it). */
+  | { kind: 'B6'; t: number; messages: ChatMessage[] };
+
+export type BoundaryKind = LoopBoundary['kind'];
+
 /** Provider-reported token counts for one turn (R3-220). `inputTokens` is the size
  *  of everything the provider processed this turn; `outputTokens` is what it
  *  generated. Absent when the provider emits no `usage` delta. */
@@ -179,6 +239,13 @@ export interface AgentEvents {
    *  true when an `interrupt`-mode steer cut an in-flight model turn short (as
    *  opposed to being applied at an ordinary turn boundary). */
   onSteer?(info: { messages: SteerMessage[]; interrupted: boolean }): void;
+  /** R3-559: one checkpoint boundary per `messages` mutation, plus the execution
+   *  boundaries B2 (intent, before the executor) and B3 (per completed call), and
+   *  B4 run-state stamps. The loop awaits the returned promise before proceeding:
+   *  a B2 that is not durable when the executor starts would delete the
+   *  intent-before-execute ordering (R-ARD-10a), so the writer's latency IS the
+   *  ordering. A rejected/failed write unwinds the run at that boundary. */
+  onBoundary?(b: LoopBoundary): void | Promise<void>;
 }
 
 export interface RunAgentOptions {
@@ -229,6 +296,15 @@ export interface RunAgentOptions {
    *  keep every `tool_use` paired with a `tool_result`. Absent ⇒ the loop behaves
    *  exactly as before. */
   steering?: SteerSource;
+  /** R3-559 (R-ARD-7c): the clock every boundary `t` stamp is read from. Injected
+   *  so a resumed run's replay reads journal time, not replay-time wall clock —
+   *  a resumed run must not DECIDE differently because it resumed on Tuesday. */
+  now?: () => number;
+  /** R3-559 (R-ARD-7b / G-ARD-13): carry a run's accounting across a
+   *  teardown-and-resume. The journaled B4 `runState` seeds the loop's locals, so
+   *  N teardowns cannot spend N × tokenBudget and the anti-stall / truncation
+   *  caps do not reset per teardown. */
+  resume?: { runState: RunState };
   events?: AgentEvents;
 }
 
@@ -443,10 +519,38 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   const reserveTokens = opts.reserveTokens ?? (window ? Math.floor(window * 0.25) : 0);
   const keepRecentTurns = opts.keepRecentTurns ?? 8;
 
+  // R3-559 (R-ARD-7c): the single clock seam. No boundary stamps an inline
+  // `Date.now()` — a resumed run's decisions must read journal time, and a test
+  // must be able to hold time still.
+  const now = opts.now ?? (() => Date.now());
+  // R3-559 (R-ARD-5e): effect ids are loop-minted at INTENT time — before any
+  // provider id exists — and the B3 resolving a B2 reuses it, so the linkage
+  // survives a teardown-and-resume (it lives in the journal, not memory). The
+  // per-run nonce keeps two runs on one conversation from colliding.
+  const runNonce =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  let effectSeq = 0;
+  const mintEffectId = (): string => `${runNonce}-${++effectSeq}`;
+  // R3-559: snapshot a boundary payload as plain JSON at emit time (R-ARD-5d —
+  // every entry is runtime-neutral — and the array payloads must not alias the
+  // live `messages`, which later mutations would otherwise write through into
+  // an already-journaled entry).
+  const snap = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+  // R3-559 (R-ARD-8): the loop performs no I/O — it emits, and awaits the writer.
+  // G-ARD-11's structural test requires every `messages` mutation to be
+  // IMMEDIATELY followed by an `await boundary(...)` sibling; keep that pairing
+  // exact when editing this function.
+  const boundary = (b: LoopBoundary): void | Promise<void> => events?.onBoundary?.(b);
+
   let messages: ChatMessage[] = [
     ...(opts.history ?? []),
     { role: 'user', content: [{ type: 'text', text: prompt }] },
   ];
+  // B0 — kickoff: without it, a run torn down during its FIRST model turn
+  // checkpoints nothing at all, including work the human completed.
+  await boundary({ kind: 'B0', t: now(), messages: snap(messages) });
 
   // Consecutive-stall counter: how many times in a row we've nudged a no-tool-call
   // turn. Reset to 0 by any turn that DOES call a tool, so the budget is per stall
@@ -463,6 +567,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
   // something, so "reports nothing" stays distinguishable from "cached nothing".
   let cacheReadTokens: number | undefined;
   let cacheWriteTokens: number | undefined;
+  // R3-559 (R-ARD-7b): a resumed run CONTINUES the carried accounting rather than
+  // restarting it — the spend bound must survive N teardowns (G-ARD-13).
+  if (opts.resume?.runState) {
+    const r = opts.resume.runState;
+    nudges = r.nudges;
+    truncationRetries = r.truncationRetries;
+    contextTokens = r.contextTokens;
+    spentTokens = r.spentTokens;
+    if (r.cacheReadTokens !== undefined) cacheReadTokens = r.cacheReadTokens;
+    if (r.cacheWriteTokens !== undefined) cacheWriteTokens = r.cacheWriteTokens;
+  }
+  const runState = (): RunState => ({
+    spentTokens,
+    contextTokens,
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    nudges,
+    truncationRetries,
+    ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+    ...(window !== undefined ? { contextWindow: window } : {}),
+  });
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // R3-224 (§3.3): the stop button, checked between turns. Combined with the
@@ -477,10 +602,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     if (steering) {
       const steers = steering.drain();
       if (steers.length) {
-        messages.push({
+        const steerMsg: ChatMessage = {
           role: 'user',
           content: steers.map((m) => ({ type: 'text' as const, text: steerWireText(m) })),
-        });
+        };
+        messages.push(steerMsg);
+        // B5 — an injected user turn (provider validity: replay without it has
+        // consecutive assistant messages).
+        await boundary({ kind: 'B5', t: now(), message: snap(steerMsg) });
         events?.onSteer?.({ messages: steers, interrupted: interruptedLastTurn });
       }
       interruptedLastTurn = false;
@@ -496,6 +625,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       );
       if (summarizedCount > 0) {
         messages = compacted;
+        // B6 — compaction REPLACES the transcript wholesale; an append-only journal
+        // cannot express that, so the boundary carries the whole post-compaction
+        // array and the fold folds at exactly these points.
+        await boundary({ kind: 'B6', t: now(), messages: snap(messages) });
         contextTokens = estimateTokens(messages);
         events?.onCompact?.({
           summarizedCount,
@@ -541,6 +674,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         const { messages: compacted, summarizedCount } = await compactTranscript(messages, client, keepRecentTurns);
         if (summarizedCount === 0) throw e;
         messages = compacted;
+        // B6 — the recover-then-retry compaction is the same wholesale replacement.
+        await boundary({ kind: 'B6', t: now(), messages: snap(messages) });
         contextTokens = estimateTokens(messages);
         events?.onCompact?.({
           summarizedCount,
@@ -562,10 +697,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       // then loop: the drain at the top of the next iteration injects the correction.
       if (steering?.interrupt.aborted) {
         turnAbort.dispose();
-        messages.push({
+        const partialMsg: ChatMessage = {
           role: 'assistant',
           content: [{ type: 'text', text: partialText.trim() || INTERRUPTED_TURN_TEXT }],
-        });
+        };
+        messages.push(partialMsg);
+        // B1 — the turn the user cut short, recorded as what actually happened
+        // (`partial`), so replay shows the interruption where it happened.
+        await boundary({ kind: 'B1', t: now(), blocks: snap(partialMsg.content), partial: true });
         events?.onAssistantText?.(partialText.trim() || INTERRUPTED_TURN_TEXT);
         interruptedLastTurn = true;
         continue;
@@ -603,7 +742,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     // R3-335: reasoning stays IN the message sequence — a provider that requires the
     // block echoed back gets it from `messages`, not from a side channel.
     for (const b of res.content) if (b.type === 'reasoning') events?.onReasoning?.(b);
-    messages.push({ role: 'assistant', content: res.content });
+    const assistantMsg: ChatMessage = { role: 'assistant', content: res.content };
+    messages.push(assistantMsg);
+    // B1 — the assistant turn's finalized blocks, reasoning + signatures included.
+    await boundary({ kind: 'B1', t: now(), blocks: snap(assistantMsg.content) });
 
     const toolUses = res.content.filter(
       (b): b is ToolUseBlock => b.type === 'tool_use',
@@ -622,7 +764,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         is_error: true,
       }));
       failed.push({ type: 'text', text: TRUNCATED_RETRY_TEXT });
-      messages.push({ role: 'user', content: failed });
+      const retryMsg: ChatMessage = { role: 'user', content: failed };
+      messages.push(retryMsg);
+      // B5 — the truncation path's synthetic error results + retry text (replay
+      // without it leaves a dangling tool_use repair mislabelled).
+      await boundary({ kind: 'B5', t: now(), message: snap(retryMsg) });
       if (++truncationRetries > maxTruncationRetries) break;
       continue;
     }
@@ -637,7 +783,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
       if (stall && nudges < maxNudges) {
         nudges++;
         events?.onNudge?.(stall);
-        messages.push({ role: 'user', content: [{ type: 'text', text: NUDGE_TEXT }] });
+        const nudgeMsg: ChatMessage = { role: 'user', content: [{ type: 'text', text: NUDGE_TEXT }] };
+        messages.push(nudgeMsg);
+        // B5 — the stall nudge (an injected user turn, same replay requirement).
+        await boundary({ kind: 'B5', t: now(), message: snap(nudgeMsg) });
         continue;
       }
       // R3-333 follow-up: the model is done, but the user queued something while it
@@ -656,6 +805,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     // on the wire; this is the shape both host adapters map to their provider.
     const images: ImageBlock[] = [];
     for (const call of toolUses) {
+      // B2 — tool intent, durable BEFORE the executor runs (R-ARD-10a: the loop
+      // never executes past an unwritten B2; it is an ordering precondition, not
+      // a log line). Awaiting the writer here is the whole mechanism.
+      const effectId = mintEffectId();
+      await boundary({ kind: 'B2', t: now(), effectId, call: snap(call) });
       events?.onToolUse?.(call.name, call.input);
       let outcome: ToolOutcome;
       try {
@@ -668,15 +822,31 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
         outcome = { content: code ? `${code}: ${msg}` : msg, isError: true };
       }
       events?.onToolResult?.(call.name, outcome);
-      results.push({
+      const result: ToolResultBlock = {
         type: 'tool_result',
         tool_use_id: call.id,
         content: outcome.content,
         is_error: outcome.isError,
+      };
+      results.push(result);
+      const callImages = outcome.images ?? [];
+      if (callImages.length) images.push(...callImages);
+      // B3 — per COMPLETED call, never per batch (R-ARD-7a): a batch torn down
+      // partway keeps results 1..k and nothing completed is recomputed. Reuses the
+      // B2's `effectId`, so the intent→outcome linkage survives teardown.
+      await boundary({
+        kind: 'B3',
+        t: now(),
+        effectId,
+        result: snap(result),
+        ...(callImages.length ? { images: snap(callImages) } : {}),
       });
-      if (outcome.images?.length) images.push(...outcome.images);
     }
-    messages.push({ role: 'user', content: [...results, ...images] });
+    const batchMsg: ChatMessage = { role: 'user', content: [...results, ...images] };
+    messages.push(batchMsg);
+    // B4 — the loop's carried accounting at the batch boundary: `spentTokens` gates
+    // the runaway-cost guard, so it is checkpointed with the batch it belongs to.
+    await boundary({ kind: 'B4', t: now(), runState: snap(runState()) });
 
     // Runaway-cost guard: stop once cumulative spend passes the budget (the token/
     // spend bound that replaces the old raw turn cap). Compaction keeps a single
@@ -687,5 +857,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     }
   }
 
+  // B4 — run end, on EVERY exit path (stop, budget, maxTurns, genuine finish): the
+  // fold consumes this state, and a run that ends cleanly must leave the same
+  // accounting a torn-down one does.
+  await boundary({ kind: 'B4', t: now(), runState: snap(runState()) });
   return messages;
 }

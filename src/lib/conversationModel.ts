@@ -6,7 +6,7 @@
 // Types only — no runtime export — so this file never trips the Fast-Refresh
 // "components-only" lint and can be imported anywhere.
 
-import type { ChatMessage } from './agentLoop';
+import type { ChatMessage, RunState } from './agentLoop';
 
 /** The current stored-record schema version. Bump + migrate on a shape change. */
 export type ConversationSchema = 1;
@@ -38,4 +38,17 @@ export interface Conversation extends ConversationMeta {
   messages: ChatMessage[];
   /** Which mount this conversation edits, if pinned (optional in v1). */
   workspaceMountId?: string;
+  /**
+   * R3-559 — the fold watermark: the highest journal `seq` the record's
+   * `messages` already contains. Replay skips entries at/below it, which is what
+   * makes replay idempotent and a re-delivered entry harmless (R-ARD-5).
+   * Additive-optional: a legacy record has none and replays from the whole journal.
+   */
+  foldedSeq?: number;
+  /**
+   * R3-559 — the loop's carried accounting at the last fold (R-ARD-7b). A resume
+   * driven from the folded record alone continues the spend bound rather than
+   * restarting it (G-ARD-16's second-device view). Absent on legacy records.
+   */
+  runState?: RunState;
 }

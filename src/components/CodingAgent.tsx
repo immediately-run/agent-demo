@@ -20,12 +20,20 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
-import { runAgent } from "../lib/agentLoop";
+import { runAgent, type LoopBoundary } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import "./CodingAgent.css";
+
+/** R-ARD-10: the row for a run that cannot be persisted at all (no store — no
+ *  host / signed out / settings mount dead). One copy: the mount effect and the
+ *  run-start re-check both use it, so the copy cannot drift. */
+const noStoreRow = (e: unknown): LogEntry => ({
+  kind: "error",
+  text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
+});
 
 export default function CodingAgent() {
   const catalog = useCatalog();
@@ -33,7 +41,7 @@ export default function CodingAgent() {
   const [prompt, setPrompt] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState("");
-  // R3-335 — the in-flight reasoning for the current turn (cleared when the whole block
+  // R3-335 — the in-flight reasoning for the current block (cleared when the whole block
   // arrives and becomes a transcript row).
   const [thinking, setThinking] = useState("");
   const [running, setRunning] = useState(false);
@@ -43,6 +51,9 @@ export default function CodingAgent() {
   // failure degrades to today's ephemeral behavior rather than crashing.
   const storeRef = useRef<ConversationStore | null>(null);
   const convRef = useRef<Conversation | null>(null);
+  // R-ARD-10: why the store is absent, when it is — the run-start re-check needs
+  // it after `setLog([])` wipes the mount-time row.
+  const storeOpenErrorRef = useRef<unknown>(null);
   // R3-224 (§3.3): the stop button's abort controller for the in-flight run.
   const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -57,8 +68,13 @@ export default function CodingAgent() {
         if (!live || !conv) return;
         convRef.current = conv;
         if (conv.messages.length) setLog(messagesToLog(conv.messages));
-      } catch {
-        /* no host / signed out — stay ephemeral */
+      } catch (e) {
+        // R-ARD-10: no store at all (no host / signed out / settings mount dead)
+        // means a fully ephemeral run — allowed, but never a silent downgrade.
+        if (live) {
+          storeOpenErrorRef.current = e;
+          setLog((l) => [...l, noStoreRow(e)]);
+        }
       }
     })();
     return () => {
@@ -102,11 +118,39 @@ export default function CodingAgent() {
     if (!prompt.trim() || running) return;
     setRunning(true);
     setLog([]);
+    // R-ARD-10: the mount-time no-store row was just wiped by setLog([]) above —
+    // an ephemeral run must SAY it is ephemeral on every run, not only at mount.
+    if (!storeRef.current && storeOpenErrorRef.current !== null) {
+      append(noStoreRow(storeOpenErrorRef.current));
+    }
     setStreaming("");
     setThinking("");
     append({ kind: "user", text: prompt });
     const controller = new AbortController();
     abortRef.current = controller;
+    // R3-559: the conversation must exist BEFORE the run starts — the checkpoint
+    // journal appends into it from the first boundary (B0), so a fresh run creates
+    // its record up-front rather than at persist time.
+    const store = storeRef.current;
+    if (store && !convRef.current) {
+      try {
+        convRef.current = await store.create();
+      } catch (e) {
+        // R-ARD-10: an un-checkpointable run is allowed to start, and SAYS SO —
+        // never a silent downgrade to ephemeral. The run proceeds exactly as the
+        // pre-journal agent did; the user is told what that costs.
+        append(noStoreRow(e));
+      }
+    }
+    // Same rule for the journal tier: journalless is a degradation the user can
+    // see (the conversation still saves at run end; the checkpoint floor is gone).
+    if (store && convRef.current && !store.hasJournal()) {
+      append({
+        kind: "error",
+        text: "Checkpoints are off (no device-local store) — closing this tab loses the in-flight turn; the conversation itself still saves when the run ends.",
+      });
+    }
+    const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
@@ -120,6 +164,16 @@ export default function CodingAgent() {
         // (R3-220): the resolved provider's window drives when to compact.
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
+          // R3-559: append every boundary to the conversation's journal (B2
+          // intent is durable before its executor runs — R-ARD-10a). The loop
+          // awaits this; a failed append unwinds the run at that boundary.
+          ...(journalConv
+            ? {
+                onBoundary: async (b: LoopBoundary) => {
+                  await store!.append(journalConv.id, b);
+                },
+              }
+            : {}),
           onAssistantDelta: (text) => setStreaming((s) => s + text),
           // R3-335 — the live thinking surface. Now that compaction lets a task run past
           // a dozen turns, the silent stretches are longer, and "is it stuck or
@@ -141,8 +195,16 @@ export default function CodingAgent() {
           onToolResult: (name, r) =>
             append({ kind: "result", name, content: r.content, isError: r.isError }),
           onNudge: () => append({ kind: "nudge" }),
-          onCompact: ({ summarizedCount }) =>
-            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` }),
+          onCompact: ({ summarizedCount }) => {
+            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` });
+            // R3-559 (R-ARD-9): fold at the compaction boundary, best-effort — the
+            // run-end fold is the authoritative write (see ConversationStage).
+            if (journalConv) {
+              void store!.fold(journalConv.id).catch((e) => {
+                console.warn("mid-run fold at compaction failed (run-end fold still will)", e);
+              });
+            }
+          },
         },
       });
       await persist(transcript);
@@ -159,14 +221,18 @@ export default function CodingAgent() {
   // R3-224 (§3.3): abort the in-flight run — the loop AND the upstream LLM request.
   const stop = () => abortRef.current?.abort();
 
-  // Save the run into its conversation (best-effort; no-op without a store).
+  // Save the run into its conversation — a FOLD when the journal tier is wired
+  // (R3-559: stamps the fold watermark + carried run-state, reclaims the
+  // superseded entries), a plain save otherwise. Best-effort; no-op without a store.
   const persist = async (messages: Conversation["messages"]) => {
     const store = storeRef.current;
     if (!store) return;
     try {
       const conv = convRef.current ?? (await store.create());
       const title = conv.title === "New conversation" ? deriveTitle(messages) : conv.title;
-      convRef.current = await store.save({ ...conv, title, messages });
+      convRef.current = store.hasJournal()
+        ? await store.fold(conv.id, { messages, title })
+        : await store.save({ ...conv, title, messages });
     } catch {
       /* persistence is best-effort — never break the run on a write failure */
     }
