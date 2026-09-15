@@ -57,8 +57,17 @@ export default function CodingAgent() {
         if (!live || !conv) return;
         convRef.current = conv;
         if (conv.messages.length) setLog(messagesToLog(conv.messages));
-      } catch {
-        /* no host / signed out — stay ephemeral */
+      } catch (e) {
+        // R-ARD-10: no store at all (no host / signed out / settings mount dead)
+        // means a fully ephemeral run — allowed, but never a silent downgrade.
+        // (`append` is declared below this effect; the setter is equivalent here.)
+        if (live) {
+          const row: LogEntry = {
+            kind: "error",
+            text: `This run can't be saved (${(e as Error)?.message ?? String(e)}) — closing the tab loses it.`,
+          };
+          setLog((l) => [...l, row]);
+        }
       }
     })();
     return () => {

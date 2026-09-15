@@ -366,3 +366,83 @@ describe('conversationStore — a store fault at B2 (G-ARD-14)', () => {
     expect(replayed.messages.length).toBeGreaterThan(0);
   });
 });
+
+describe('conversationStore — fold/append concurrency (review round 2)', () => {
+  /** MemFs whose SYNCED-TIER (record) writes hang on a manual gate once armed —
+   *  the mid-run compaction-fold race, made deterministic. The returned `fs` IS
+   *  the gated one; pass it to the store. */
+  const gatedRecordFs = (): { fs: MemFs; writes: string[]; arm: () => void; release: () => Promise<void> } => {
+    const inner = new MemFs();
+    const writes: string[] = [];
+    let armed = false;
+    const pending: (() => void)[] = [];
+    const g: MemFs = Object.create(inner);
+    g.files = inner.files;
+    g.writeFile = async (path: string, data: string): Promise<void> => {
+      if (armed && path.startsWith('/settings/')) {
+        writes.push(path);
+        await new Promise<void>((res) => pending.push(res));
+      }
+      return inner.writeFile(path, data);
+    };
+    return {
+      fs: g,
+      writes,
+      arm: () => {
+        armed = true;
+      },
+      release: async () => {
+        await new Promise((r) => setTimeout(r, 0));
+        pending.splice(0).forEach((res) => res());
+      },
+    };
+  };
+
+  it('a mid-run fold completing AFTER later appends never moves the seq cache backward (no re-minted, overwritten entry)', async () => {
+    const { fs, arm, release } = gatedRecordFs();
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] })); // seq 1
+    await s.append(conv.id, b('B1', { blocks: [{ type: 'text', text: 'turn one' }] })); // seq 2
+
+    // Start the fold; its synced-tier save is now held in flight.
+    arm();
+    const foldP = s.fold(conv.id, { messages: [userMsg('go')] });
+    await new Promise((r) => setTimeout(r, 0)); // the fold reaches its gated save
+
+    // The loop keeps appending while the fold's save is in flight (seq 3).
+    await s.append(conv.id, b('B2', { effectId: 'e', call: { type: 'tool_use', id: 'tu', name: 't', input: {} } }));
+
+    // Release the fold. Its snapshot says lastSeq=2; the cache says 3. A
+    // backward move would make the NEXT append re-mint 3 and overwrite the B2.
+    await release();
+    await foldP;
+
+    const seq4 = await s.append(conv.id, b('B3', { effectId: 'e', result: { type: 'tool_result', tool_use_id: 'tu', content: 'r' } }));
+    expect(seq4).toBe(4);
+    // The durable B2 at seq 3 was not overwritten.
+    const entries = entryFiles(fs, conv.id).filter(([, e]) => e.seq >= 3);
+    expect(entries.map(([, e]) => e.kind)).toEqual(['B2', 'B3']);
+    // And replay still resolves the effect — the entry at seq 3 is intact.
+    const replayed = await s.replay(conv.id);
+    expect(replayed.pendingEffects).toEqual([]);
+  });
+
+  it('folds serialize per conversation: the second fold waits for the first (no out-of-order watermarks)', async () => {
+    const { fs, arm, release, writes } = gatedRecordFs();
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    arm();
+    const f1 = s.fold(conv.id, {});
+    await new Promise((r) => setTimeout(r, 0)); // f1 is gated on its record write
+    const f2 = s.fold(conv.id, {});
+    await new Promise((r) => setTimeout(r, 0));
+    expect(writes).toHaveLength(1); // f2's record write has not started
+    await release();
+    await f1;
+    await release(); // f2's own gated write, if the chain let it start post-f1
+    await f2;
+    expect(writes.length).toBeGreaterThanOrEqual(2);
+  });
+});

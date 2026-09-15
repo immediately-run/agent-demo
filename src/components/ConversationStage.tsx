@@ -40,6 +40,12 @@ import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe } from "../lib/storeError";
 import "./CodingAgent.css";
 
+// R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
+// (history not re-sent) and the durability consequence (a closed tab loses the
+// run). One constant so a fourth call site cannot ship the old copy.
+const NO_STORE_SUFFIX =
+  ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn";
+
 export default function ConversationStage() {
   const catalog = useCatalog();
   const mounts = useMounts();
@@ -201,7 +207,7 @@ export default function ConversationStage() {
       } catch (e) {
         // Signed out is the ordinary case; anything else is a real fault the user
         // must see, because it costs them conversation memory.
-        if (live) setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
+        if (live) setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     })();
     // R3-631 — open the projection writer on the same mount, independently: a
@@ -293,7 +299,7 @@ export default function ConversationStage() {
         // Running ephemerally is a real degradation, not a detail: `history`
         // below falls back to [], so the model sees ONLY this prompt and the
         // conversation appears to have no memory. Say so (R3-247).
-        setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
+        setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     }
     // R3-559: the checkpoint journal. When the device-local tier is wired, every
@@ -425,7 +431,7 @@ export default function ConversationStage() {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
           // dead store, one turn later. Never silent (R3-247).
-          setStoreError(describe(e, ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn"));
+          setStoreError(describe(e, NO_STORE_SUFFIX));
         }
       }
     } catch (e) {

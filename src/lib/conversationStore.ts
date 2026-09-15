@@ -215,8 +215,19 @@ export function createConversationStore(opts: {
   // seq allocation (R-ARD-5c: by the lease holder — this writer, until R3-561's
   // advisory lease exists). Lazily seeded per conversation from the journal head
   // AND the record's fold watermark, so a fold that reclaimed entries still mints
-  // seqs above everything the record already contains.
+  // seqs above everything the record already contains. The cache only ever moves
+  // FORWARD (clamp): a mid-run fold's snapshot can be staler than appends that
+  // landed while its synced-tier save was in flight, and a backward move would
+  // re-mint a durable seq and silently overwrite that entry.
   const lastSeq = new Map<string, number>();
+  const bumpSeq = (id: string, seq: number): void => {
+    lastSeq.set(id, Math.max(lastSeq.get(id) ?? 0, seq));
+  };
+  // Folds are SERIALIZED per conversation (chained): a mid-run compaction fold
+  // and the run-end fold both write the record and reclaim entries, and two in
+  // flight at once could write watermarks out of order. Chaining also makes the
+  // run-end fold await any in-flight mid-run fold.
+  const foldChain = new Map<string, Promise<unknown>>();
 
   const ensureDir = () => p.mkdir(recordDir, { recursive: true });
 
@@ -311,7 +322,7 @@ export function createConversationStore(opts: {
       return await Promise.race([
         (async (): Promise<number> => {
           const seq = await nextSeq(convId);
-          lastSeq.set(convId, seq);
+          bumpSeq(convId, seq);
           const entry: JournalEntry = { ...payload, seq, kind: b.kind, schema: 1, t: b.t };
           await p.mkdir(convJournalDir(convId), { recursive: true });
           await p.writeFile(`${convJournalDir(convId)}/${seq}.json`, JSON.stringify(entry));
@@ -347,6 +358,30 @@ export function createConversationStore(opts: {
     };
     for (const e of entries) {
       if (e.seq <= foldedSeq) continue; // already folded into the record — harmless
+      // Fail closed on a known kind with a missing payload, for the same reason
+      // the unknown-kind default refuses: a silently skipped B5 yields
+      // provider-invalid consecutive assistant messages, a B0/B6 without its
+      // array wipes the transcript to []. Corrupt is corrupt — name it.
+      const missing = (() => {
+        switch (e.kind) {
+          case 'B0':
+          case 'B6':
+            return e.messages === undefined ? 'messages' : null;
+          case 'B1':
+            return e.blocks === undefined ? 'blocks' : null;
+          case 'B2':
+            return e.call === undefined || e.effectId === undefined ? 'call/effectId' : null;
+          case 'B3':
+            return e.result === undefined || e.effectId === undefined ? 'result/effectId' : null;
+          case 'B5':
+            return e.message === undefined ? 'message' : null;
+          default:
+            return null; // B4 carries no required payload; unknown kinds refused above
+        }
+      })();
+      if (missing) {
+        throw errWithCode('journal-corrupt', `journal entry ${e.seq} (${e.kind}) is missing its ${missing} payload`);
+      }
       switch (e.kind) {
         case 'B0':
           closeBatch();
@@ -448,6 +483,23 @@ export function createConversationStore(opts: {
     id: string,
     patch?: { messages?: ChatMessage[]; title?: string; repo?: string },
   ): Promise<Conversation> => {
+    // Serialized per conversation: the chained predecessor (if any) completes
+    // first, so two folds can never write watermarks out of order.
+    const prior = foldChain.get(id) ?? Promise.resolve();
+    const run = (): Promise<Conversation> => foldNow(id, patch);
+    const chained = prior.then(run, run);
+    foldChain.set(id, chained);
+    try {
+      return await chained;
+    } finally {
+      if (foldChain.get(id) === chained) foldChain.delete(id);
+    }
+  };
+
+  const foldNow = async (
+    id: string,
+    patch?: { messages?: ChatMessage[]; title?: string; repo?: string },
+  ): Promise<Conversation> => {
     const conv = await load(id);
     if (!conv) throw errWithCode('ENOENT', `conversation ${id} not found`);
     let next: Conversation;
@@ -466,7 +518,9 @@ export function createConversationStore(opts: {
       ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
     };
     const saved = await save(next);
-    lastSeq.set(id, replayed.lastSeq);
+    // CLAMPED forward: appends that landed while the (synced-tier) record save
+    // was in flight are already above the snapshot — never move the cache back.
+    bumpSeq(id, replayed.lastSeq);
     await reclaimThrough(id, replayed.lastSeq); // R-ARD-5c: the fold supersedes
     return saved;
   };
