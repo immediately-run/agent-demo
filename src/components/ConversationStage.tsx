@@ -44,14 +44,14 @@ import "./CodingAgent.css";
 // R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
 // (history not re-sent) and the durability consequence (a closed tab loses the
 // run). One constant so a fourth call site cannot ship the old copy.
-/** R-ARD-10a: the copy for a checkpoint-append refusal — the run stopped AT a
-//  boundary and everything checkpointed so far survives. One home, used by both
-//  run surfaces’s journal-failure catches. */
-const JOURNAL_REFUSAL_SUFFIX =
-  ", so the run stopped at its last checkpoint — nothing after it was kept";
-
 const NO_STORE_SUFFIX =
   ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn";
+
+// R-ARD-10a: the copy for a checkpoint-append refusal — the run stopped AT a
+// boundary and everything checkpointed so far survives. One home, used by both
+// run surfaces's journal-failure catches.
+const JOURNAL_REFUSAL_SUFFIX =
+  ", so the run stopped at its last checkpoint — nothing after it was kept";
 
 export default function ConversationStage() {
   const catalog = useCatalog();
@@ -207,7 +207,10 @@ export default function ConversationStage() {
           }
         })
         .finally(() => {
-          if (replayInFlightRef.current?.convId === conv.id) replayInFlightRef.current = null;
+          // Promise-identity, not convId: a same-conversation re-select (the
+          // panel's repair gesture) starts a NEWER replay whose marker the older
+          // promise's finally must not clear.
+          if (replayInFlightRef.current?.promise === promise) replayInFlightRef.current = null;
         });
       replayInFlightRef.current = { convId: conv.id, promise };
     }

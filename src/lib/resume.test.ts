@@ -198,8 +198,6 @@ describe('resume — repair, proven against real killed runs (G-ARD-3 / R-ARD-12
   });
 });
 
-// ---- the pinned prefix / live suffix split (R-ARD-17 / G-ARD-9) --------------------
-
 // ---- attended resume: boot executes nothing (G-ARD-4) -----------------------------
 
 describe('resume — attended: booting an interrupted journal executes nothing until the user acts (G-ARD-4)', () => {

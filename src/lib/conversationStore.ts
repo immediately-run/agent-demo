@@ -215,8 +215,10 @@ const errWithCode = (code: string, msg: string): Error => Object.assign(new Erro
 
 /** R3-560: did this thrown value come from the journal's fail-closed refusals
  *  (corrupt / unknown schema / incoherent seq / timeout / unavailability)?
- *  The ONE predicate — callers never re-type the `journal-` prefix dance, and
- *  the copy that names the durability consequence lives beside it. */
+ *  The ONE predicate — callers never re-type the `journal-` prefix dance. The
+ *  user-facing copy that names the durability consequence lives with the catch
+ *  sites in ConversationStage (JOURNAL_REFUSAL_SUFFIX), which is where run
+ *  surfaces live. */
 export const isJournalRefusal = (e: unknown): boolean =>
   typeof (e as { code?: string })?.code === 'string' && ((e as { code: string }).code.startsWith('journal-'));
 
