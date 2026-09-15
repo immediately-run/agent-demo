@@ -8,6 +8,27 @@
 # contribute-manifest sidecar so edits made on immediately.run can still be
 # pushed back to GitHub offline.
 #
+# It also embeds the resolved-dependency LOCKSET and, since R3-567, the dependency
+# CONTENT (--bundle-packages) — so a repo boots without the sandbox having to resolve or
+# fetch its dependencies live. `npm ci` runs first because cache-zip fills the dependency
+# CDN's gaps from `node_modules`: the CDN cannot resolve a version its npm mirror has not
+# ingested, and that is always a FRESH publish, which is always the one sitting in the
+# installed tree.
+#
+# --bundle-packages was opt-in because "a default-on bundle could bloat the zip past the
+# host size cap". The caps are 50 MB on the response body and 250 MB decompressed
+# (ZIP_CACHE_AUTOMATION_SPEC §8). Measured on landing-page with every package sourced from
+# node_modules — 9 packages including react-dom and lucide-react's ~1800 icon entries — the
+# zip is 3.0 MB compressed / 19 MB decompressed. That is the realistic upper end for an app
+# of this shape, and it is an order of magnitude inside both caps.
+#
+# Note it is LARGER than a CDN-sourced bundle, deliberately: the CDN evaluates NODE_ENV and
+# keeps one branch, while a static build cannot know which the runtime will take, so both
+# are carried. Over-inclusion costs bytes; under-inclusion costs a blocking third-party
+# fetch at boot for the missing file. An oversize zip is also a graceful degradation rather
+# than a break — the runtime aborts and falls through to the REST API — so the cost of being
+# wrong here is a slow boot, not a broken one.
+#
 # Pages is auto-provisioned by the `actions/configure-pages` step below
 # (enablement: true), so no manual Settings → Pages step is needed on a fresh repo.
 #
@@ -95,13 +116,38 @@ jobs:
           enablement: true
           token: ${{ steps.pages-token.outputs.token || github.token }}
 
+      # Install this repo's dependencies BEFORE caching (R3-567).
+      #
+      # WHY. `cache-zip` resolves the dependency lockset — and, with --bundle-packages,
+      # the module content — from the sandpack dependency CDN. That CDN's npm mirror lags
+      # a fresh publish by hours, and on 2026-09-08 that kept immediately.run's front door
+      # blank long after the bug had been fixed and released: the cached zip, the one
+      # artifact that should have covered the outage, was itself built by asking the
+      # service that was failing. `cache-zip` now fills the CDN's gaps from `node_modules`
+      # — but only if there IS one.
+      #
+      # NON-FATAL, and conditional on a lockfile. A repo with no package-lock.json, or one
+      # whose install fails, must keep caching exactly as before: cache-zip falls back to
+      # the CDN on its own, so the worst case here is today's behaviour, not a broken
+      # build. `npm ci --ignore-scripts` because this step exists to populate a directory,
+      # not to run a package's arbitrary postinstall on a runner holding `pages: write`.
+      - name: Install dependencies (for the lockset; optional)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund || \
+              echo "::warning::npm ci failed; cache-zip will fall back to the package CDN"
+          else
+            echo "no package-lock.json — skipping install; cache-zip will use the package CDN"
+          fi
+
       - name: Build cache zip
         run: |
-          npx -y @immediately-run/cli@0.8.0 cache-zip \
+          npx -y @immediately-run/cli@0.8.2 cache-zip \
             --owner "${{ github.repository_owner }}" \
             --repo "${{ github.event.repository.name }}" \
             --ref "${{ github.ref_name }}" \
             --default-branch "${{ github.event.repository.default_branch }}" \
+            --bundle-packages \
             --out "_site/cached_repositories/${{ github.ref_name }}.zip"
 
       # A friendly landing page so the Pages root isn't a bare 404. Optional —
