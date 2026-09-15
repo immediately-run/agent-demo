@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSystemPrompt, todayIso, type PromptTool } from './agentPrompt';
+import { buildSystemPrompt, buildPinnedPrefix, buildLiveSuffix, todayIso, type PromptTool } from './agentPrompt';
 
 const fsTools: PromptTool[] = [
   { name: 'read_file', description: 'Read a UTF-8 text file from the workspace.' },
@@ -67,3 +67,31 @@ describe('buildSystemPrompt (R3-221 — generate from live toolset)', () => {
     expect(todayIso()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+describe('R3-560 — the pinned prefix / live suffix split (R-ARD-17)', () => {
+  it('the pinned prefix is byte-identical across a date change ONLY when the frozen date is reused', () => {
+    const run1 = buildPinnedPrefix({ today: '2026-09-15' });
+    // A different live context must not touch the prefix — it takes only the date.
+    expect(buildPinnedPrefix({ today: '2026-09-15' })).toBe(run1);
+    // The date-boundary case: midnight passes; rebuilding with the NEW date
+    // changes the bytes (the silent cache-void), so resume must replay the
+    // JOURNALED bytes instead of rebuilding.
+    expect(buildPinnedPrefix({ today: '2026-09-16' })).not.toBe(run1);
+    expect(run1).toContain('2026-09-15');
+    // No authority content in the prefix: the roster and workspace are live.
+    expect(run1).not.toContain('Available tools');
+    expect(run1).not.toContain('Workspace root');
+  });
+
+  it('the live suffix drops a tool removed from the catalog (a revoked tool is honestly absent)', () => {
+    const a = { name: 'fs__read_file', description: 'read' };
+    const b = { name: 'fs__write_file', description: 'write' };
+    const before = buildLiveSuffix({ tools: [a, b], workspaceRoot: '/mnt/x' });
+    expect(before).toContain('fs__read_file');
+    const after = buildLiveSuffix({ tools: [b], workspaceRoot: '/mnt/x' });
+    expect(after).not.toContain('fs__read_file'); // revoked ⇒ absent, cache miss taken honestly
+    expect(after).toContain('fs__write_file');
+  });
+});
+
+

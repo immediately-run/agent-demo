@@ -189,7 +189,17 @@ describe('conversationStore — replay (R-ARD-5 / R-ARD-7a)', () => {
     const s = twoTier(fs);
     const conv = await s.create();
     await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
-    await s.append(conv.id, b('B1', { blocks: [{ type: 'tool_use', id: 'tuA', name: 't', input: {} }] }));
+    // The assistant turn carries the tool_use blocks (the realistic shape — the
+    // executor never runs a call the transcript does not show being issued).
+    await s.append(
+      conv.id,
+      b('B1', {
+        blocks: [
+          { type: 'tool_use', id: 'tuA', name: 't', input: {} },
+          { type: 'tool_use', id: 'tuB', name: 't', input: {} },
+        ],
+      }),
+    );
     await s.append(conv.id, b('B2', { effectId: 'eA', call: { type: 'tool_use', id: 'tuA', name: 't', input: {} } }));
     await s.append(
       conv.id,
@@ -416,20 +426,22 @@ describe('conversationStore — fold/append concurrency (review round 2)', () =>
     const foldP = s.fold(conv.id, { messages: [userMsg('go')] });
     await new Promise((r) => setTimeout(r, 0)); // the fold reaches its gated save
 
-    // The loop keeps appending while the fold's save is in flight (seq 3).
+    // The loop keeps appending while the fold's save is in flight (seq 3): a
+    // complete assistant-turn + intent + result triple, the realistic shape.
+    await s.append(conv.id, b('B1', { blocks: [{ type: 'tool_use', id: 'tu', name: 't', input: {} }] }));
     await s.append(conv.id, b('B2', { effectId: 'e', call: { type: 'tool_use', id: 'tu', name: 't', input: {} } }));
 
-    // Release the fold. Its snapshot says lastSeq=2; the cache says 3. A
-    // backward move would make the NEXT append re-mint 3 and overwrite the B2.
+    // Release the fold. Its snapshot says lastSeq=2; the cache says 4. A
+    // backward move would make the NEXT append re-mint 4 and overwrite the B2.
     await release();
     await foldP;
 
-    const seq4 = await s.append(conv.id, b('B3', { effectId: 'e', result: { type: 'tool_result', tool_use_id: 'tu', content: 'r' } }));
-    expect(seq4).toBe(4);
-    // The durable B2 at seq 3 was not overwritten.
+    const seq5 = await s.append(conv.id, b('B3', { effectId: 'e', result: { type: 'tool_result', tool_use_id: 'tu', content: 'r' } }));
+    expect(seq5).toBe(5);
+    // The durable B2 at seq 4 was not overwritten.
     const entries = entryFiles(fs, conv.id).filter(([, e]) => e.seq >= 3);
-    expect(entries.map(([, e]) => e.kind)).toEqual(['B2', 'B3']);
-    // And replay still resolves the effect — the entry at seq 3 is intact.
+    expect(entries.map(([, e]) => e.kind)).toEqual(['B1', 'B2', 'B3']);
+    // And replay still resolves the effect — the B2 entry at seq 4 is intact.
     const replayed = await s.replay(conv.id);
     expect(replayed.pendingEffects).toEqual([]);
   });

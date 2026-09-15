@@ -89,27 +89,46 @@ const WORKFLOW_GUIDANCE: string[] = [
 ];
 
 /**
- * Assemble the system prompt from live context. Pure + deterministic (no `Date.now`),
- * so it is unit-testable and the two surfaces share one source of truth.
+ * The PINNED PREFIX (R-ARD-17): role framing, platform rules, the workflow
+ * guidance, and the date frozen at run start. No authority content — nothing
+ * derived from the live catalog — so checkpointing and replaying these bytes
+ * trades nothing for the cache hit. Pure + deterministic.
  */
-export function buildSystemPrompt(ctx: PromptContext): string {
+export function buildPinnedPrefix(ctx: { today?: string }): string {
   const sections: string[] = [];
-
   sections.push(
     'You are a coding agent embedded in an immediately.run app. You build and edit ' +
       'web apps in the browser using the tools below.',
   );
-
   sections.push(
     'immediately.run platform rules (these apps break `vite dev`-passing code that ignores them):\n' +
       PLATFORM_RULES.map((r) => `- ${r}`).join('\n'),
   );
+  sections.push('How to work:\n' + WORKFLOW_GUIDANCE.map((g) => `- ${g}`).join('\n'));
+  // The frozen date — the one environment fact that is pure cache input. A run
+  // resumed after midnight must reuse these bytes, not re-stamp Tuesday.
+  if (ctx.today) sections.push(`Environment (run start):\n- Date: ${ctx.today}`);
+  return sections.join('\n\n');
+}
 
+/**
+ * The LIVE SUFFIX (R-ARD-17): everything derived from the live catalog — the
+ * `Available tools` roster, the offered skills, the workspace root, the route.
+ * Rebuilt on EVERY resume; the cache break at the pinned/live boundary is
+ * accepted, not worked around (replaying a stale roster would re-assert a
+ * revoked tool as available — the P3 violation R-ARD-13 forbids).
+ */
+export function buildLiveSuffix(ctx: {
+  tools: PromptTool[];
+  workspaceRoot?: string;
+  route?: string;
+  skills?: SkillSummary[];
+}): string {
+  const sections: string[] = [];
   const env: string[] = [];
-  if (ctx.today) env.push(`- Date: ${ctx.today}`);
   if (ctx.workspaceRoot) env.push(`- Workspace root: ${ctx.workspaceRoot} (paths you pass to file tools are relative to it)`);
   if (ctx.route) env.push(`- Current route: ${ctx.route}`);
-  if (env.length) sections.push('Environment:\n' + env.join('\n'));
+  if (env.length) sections.push('Environment (current):\n' + env.join('\n'));
 
   // (a) The tool list is GENERATED from the actual toolset — never a static list.
   const toolLines = ctx.tools.length
@@ -127,10 +146,32 @@ export function buildSystemPrompt(ctx: PromptContext): string {
         ctx.skills.map((s) => `- ${s.name}: ${firstLine(s.description)}`).join('\n'),
     );
   }
-
-  sections.push('How to work:\n' + WORKFLOW_GUIDANCE.map((g) => `- ${g}`).join('\n'));
-
   return sections.join('\n\n');
+}
+
+/** Join a pinned prefix and a live suffix at the cache breakpoint (R-ARD-17).
+ *  The ONE join — callers never hand-concatenate, so the boundary shape cannot
+ *  drift between surfaces. */
+export function composeSystemPrompt(pinned: string, live: string): string {
+  return live ? pinned + '\n\n' + live : pinned;
+}
+
+/**
+ * Assemble the system prompt from live context: the pinned prefix (frozen date)
+ * followed by the live suffix. Pure + deterministic (no `Date.now`), so it is
+ * unit-testable and the two surfaces share one source of truth. The pin/live
+ * split point is a provider cache breakpoint (R-ARD-17).
+ */
+export function buildSystemPrompt(ctx: PromptContext): string {
+  return composeSystemPrompt(
+    buildPinnedPrefix({ today: ctx.today }),
+    buildLiveSuffix({
+      tools: ctx.tools,
+      ...(ctx.workspaceRoot !== undefined ? { workspaceRoot: ctx.workspaceRoot } : {}),
+      ...(ctx.route !== undefined ? { route: ctx.route } : {}),
+      ...(ctx.skills !== undefined ? { skills: ctx.skills } : {}),
+    }),
+  );
 }
 
 /** One-line-clamp a tool description so the generated list stays scannable. */

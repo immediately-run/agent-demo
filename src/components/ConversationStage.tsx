@@ -19,12 +19,13 @@ import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
 import { createDiagnosticsToolset } from "../lib/diagnosticsTools";
 import { createGitToolset } from "../lib/gitTools";
-import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
+import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
-import { runAgent } from "../lib/agentLoop";
+import { runAgent, type RunState } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
-import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
+import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
+import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
 import {
   openSessionProjectionWriter,
   createProjectionPublisher,
@@ -45,6 +46,12 @@ import "./CodingAgent.css";
 // run). One constant so a fourth call site cannot ship the old copy.
 const NO_STORE_SUFFIX =
   ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn";
+
+// R-ARD-10a: the copy for a checkpoint-append refusal — the run stopped AT a
+// boundary and everything checkpointed so far survives. One home, used by both
+// run surfaces's journal-failure catches.
+const JOURNAL_REFUSAL_SUFFIX =
+  ", so the run stopped at its last checkpoint — nothing after it was kept";
 
 export default function ConversationStage() {
   const catalog = useCatalog();
@@ -96,6 +103,22 @@ export default function ConversationStage() {
   // chatbot that re-reads nothing between turns. That failure used to be
   // swallowed by empty `catch {}`s — surface it instead (R3-247).
   const [storeError, setStoreError] = useState<string | null>(null);
+  // R3-560: an interrupted run detected on this conversation — the journal says
+  // a run was in flight and never reached its final `runEnd` B4. Resume is
+  // ATTENDED (R-ARD-15): rendering this affordance is all the boot path does;
+  // no model call, no executor, nothing until the user picks an action.
+  const [pendingResume, setPendingResumeState] = useState<{ convId: string; replay: ReplayResult } | null>(null);
+  // Ref mirror — the attended gate in run() must read the CURRENT value after
+  // awaiting an in-flight replay, which a render-closed state variable cannot give.
+  const pendingResumeRef = useRef<{ convId: string; replay: ReplayResult } | null>(null);
+  const setPendingResume = (v: { convId: string; replay: ReplayResult } | null): void => {
+    pendingResumeRef.current = v;
+    setPendingResumeState(v);
+  };
+  // The boot replay currently in flight, if any — `run()` must not start past an
+  // unresolved interruption check (the TOCTOU hole: a kickoff that slips between
+  // the replay call and its result takes the restart-and-lose-tail path).
+  const replayInFlightRef = useRef<{ convId: string; promise: Promise<void> } | null>(null);
 
   // R3-615 — follow the stream. The transcript and the live reasoning box each pin to
   // their newest row while the reader is at the bottom, and stop the moment they scroll
@@ -153,6 +176,44 @@ export default function ConversationStage() {
     setLog(messagesToLog(conv.messages));
     setStreaming("");
     publisherRef.current?.onShow();
+    // R3-560: is there an interrupted run on this conversation? Read the JOURNAL
+    // (not warm state) and offer the attended choices if so. Read-only — the
+    // boot path executes nothing (G-ARD-4). When interrupted, the transcript
+    // rendered is the REPLAYED one — the record alone is folded through the last
+    // run end and would show a blank/stale view over a live tail (R-ARD-15).
+    setPendingResume(null);
+    const store = storeRef.current;
+    if (store?.hasJournal()) {
+      const promise = store
+        .replay(conv.id)
+        .then((r) => {
+          if (convRef.current?.id !== conv.id || runningIdRef.current !== null) return;
+          if (!interrupted(r)) return;
+          setLog(messagesToLog(r.messages));
+          setPendingResume({ convId: conv.id, replay: r });
+        })
+        .catch((e) => {
+          // R-ARD-14 / §9: a refused journal (corrupt/schema/incoherent) means
+          // the conversation is UN-RESUMABLE — say the resume was withheld,
+          // never silently best-effort it. Other failures are store faults.
+          if (convRef.current?.id !== conv.id) return;
+          if (isJournalRefusal(e)) {
+            append({
+              kind: "error",
+              text: "This conversation's checkpoint journal can't be read, so its interrupted run can't be resumed — the saved conversation still opens.",
+            });
+          } else {
+            setStoreError(describe(e, NO_STORE_SUFFIX));
+          }
+        })
+        .finally(() => {
+          // Promise-identity, not convId: a same-conversation re-select (the
+          // panel's repair gesture) starts a NEWER replay whose marker the older
+          // promise's finally must not clear.
+          if (replayInFlightRef.current?.promise === promise) replayInFlightRef.current = null;
+        });
+      replayInFlightRef.current = { convId: conv.id, promise };
+    }
   }, []);
 
   // One arbiter per mount (never module scope): it holds the held selection and the
@@ -272,6 +333,28 @@ export default function ConversationStage() {
 
   const run = async () => {
     if (!prompt.trim() || running) return;
+    // R3-560 (R-ARD-15, the attended gate): an interrupted run on THIS
+    // conversation demands a choice first. A fresh kickoff past it would seed
+    // history from the stale record, B0-replace the journal's transcript, and
+    // fold-reclaim the interrupted tail — completed tool results vanishing from
+    // the transcript while their file effects stay, the exact §0 divergence
+    // this item exists to remove. Refuse; the affordance is one row above.
+    // The interruption check may still be IN FLIGHT (boot replay) — wait for it
+    // before deciding, or the gate has a hole exactly one tick wide.
+    const convForGate = convRef.current;
+    const inflight = replayInFlightRef.current;
+    if (convForGate && inflight && inflight.convId === convForGate.id) {
+      await inflight.promise;
+    }
+    const pending = pendingResumeRef.current;
+    if (pending && convRef.current && pending.convId === convRef.current.id) {
+      append({
+        kind: "error",
+        text: "This run was interrupted — choose Resume run, or Keep the files and end the run, before starting a new one.",
+      });
+      return;
+    }
+    setPendingResume(null);
     // Refuse rather than author the wrong tree: with no conferred stage-app working
     // tree, the agent has no filesystem tools, so a "build me X" prompt would either
     // do nothing or (pre-fix) silently edit the agent's own repo. Tell the user.
@@ -330,12 +413,20 @@ export default function ConversationStage() {
     steerRef.current = steering;
     setQueued([]);
     const offSteerChange = steering.onChange((pending) => setQueued([...pending]));
+    // R3-560 (R-ARD-17): the prompt splits at a cache breakpoint — the PINNED
+    // prefix (role, rules, workflow, the date frozen at run start) is stamped
+    // into B0 so a resume replays these bytes exactly; the LIVE suffix (tools,
+    // skills, workspace root) is rebuilt every time and the cache break at the
+    // boundary is accepted, not worked around.
+    const pinnedPrefix = buildPinnedPrefix({ today: todayIso() });
     try {
       const transcript = await runAgent({
         client: createChatModelClient(),
         tools: toolset.tools,
         execute: toolset.execute,
-        system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot: stageTree?.root, today: todayIso() }),
+        system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
+        workspace: workspaceRepo ?? undefined,
+        systemPrefix: pinnedPrefix,
         history,
         prompt: kickoff,
         // R3-224 (§3.3): the stop button aborts the loop AND the in-flight LLM turn.
@@ -439,8 +530,8 @@ export default function ConversationStage() {
       // R3-559 (R-ARD-10a): a failed checkpoint append unwinds the run here. Name
       // the durability consequence — the run stopped AT a boundary and everything
       // checkpointed so far survives (the journal stays resumable).
-      if ((e as { code?: string })?.code?.startsWith('journal-')) {
-        setStoreError(describe(e, ", so the run stopped at its last checkpoint — nothing after it was kept"));
+      if (isJournalRefusal(e)) {
+        setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
       }
     } finally {
       offSteerChange();
@@ -461,6 +552,173 @@ export default function ConversationStage() {
   const stop = useCallback(() => {
     abortRef.current?.abort();
   }, []);
+
+  // ---- R3-560: the attended-resume choices (R-ARD-15) ------------------------------
+  //
+  // Booting an interrupted conversation offered three spec'd choices; the third —
+  // "discard the tail AND revert the run's writes" — is NOT offered here because
+  // the app cannot bound which writes were the run's (the CoW layer is
+  // host-side), and a discard that silently keeps the files manufactures exactly
+  // the divergence this work exists to remove. The disposition is recorded in
+  // AGENT_RUN_DURABILITY_SPEC §5.3; the keep-choice copy says plainly that the
+  // file changes stay.
+
+  /** Resume the interrupted run: repair the transcript, name any divergence,
+   *  and continue the loop WITHOUT a new prompt turn. */
+  const resumeRun = async () => {
+    const store = storeRef.current;
+    const pending = pendingResume;
+    const conv = convRef.current;
+    if (!store || !pending || !conv || running || pending.convId !== conv.id) return;
+    // The same workspace-readiness gate as a fresh Run: a resume authors files
+    // through the conferred stage tree, and without it the loop would run
+    // catalog-only or (pre-R3-569) against the wrong tree. Refuse, say why.
+    if (!stageTree) {
+      append({
+        kind: "error",
+        text: "No app workspace is connected yet. Open an app in the stage (and give it a moment to mount) before resuming — I won't touch my own files.",
+      });
+      return;
+    }
+    setPendingResume(null);
+    const replay = pending.replay;
+    const repaired = repairTranscript({
+      messages: replay.messages,
+      pendingEffects: replay.pendingEffects,
+      trailingPartial: replay.trailingPartial,
+    });
+    // R-ARD-16: say what moved, in the transcript, before the model works. An
+    // UNSETTLED workspace channel (undefined) claims nothing — never fabricate
+    // a divergence from an unknown.
+    const divergence = divergenceMessage(replay.stampedWorkspace, workspaceRepo);
+    const resumed = resumedMessages(repaired.messages, divergence);
+    setLog(messagesToLog(repaired.messages));
+    setRunning(true);
+    runningIdRef.current = conv.id;
+    publisherRef.current?.onRunStart(conv.id);
+    setStreaming("");
+    setThinking("");
+    append({ kind: "steer", mode: "queue", text: "Run resumed from its last checkpoint" });
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const steeringC = new SteerController();
+    steerRef.current = steeringC;
+    setQueued([]);
+    const offSteerChange = steeringC.onChange((q) => setQueued([...q]));
+    // R-ARD-17: the PINNED prefix replays byte-identically from the journal (the
+    // frozen date survives midnight); the LIVE suffix is rebuilt from the
+    // current catalog — a revoked tool is absent, honestly taking the cache miss.
+    const pinnedPrefix = replay.systemPrefix ?? buildPinnedPrefix({ today: todayIso() });
+    try {
+      const transcript = await runAgent({
+        client: createChatModelClient(),
+        tools: toolset.tools,
+        execute: toolset.execute,
+        system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
+        workspace: workspaceRepo ?? undefined,
+        systemPrefix: pinnedPrefix,
+        resume: {
+          messages: resumed,
+          ...(replay.runState !== null ? { runState: replay.runState as RunState } : {}),
+        },
+        signal: controller.signal,
+        steering: steeringC,
+        contextWindow: describeChat()?.features.maxContextTokens,
+        events: {
+          onBoundary: async (b) => {
+            await store.append(conv.id, b);
+          },
+          onAssistantDelta: (text) => setStreaming((s) => s + text),
+          onReasoningDelta: (text) => setThinking((t) => t + text),
+          onReasoning: (block) => {
+            setThinking("");
+            append(
+              block.redactedData !== undefined
+                ? { kind: "reasoning", text: "", redacted: true }
+                : { kind: "reasoning", text: block.text },
+            );
+          },
+          onAssistantText: (text) => {
+            if (text === INTERRUPTED_TURN_TEXT) append({ kind: "interrupted" });
+            else if (text.trim()) append({ kind: "text", text });
+            setStreaming("");
+          },
+          onToolUse: (name, input) => append({ kind: "tool", name, input }),
+          onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
+          onNudge: () => append({ kind: "nudge" }),
+          onUsage: (u) =>
+            setUsage({
+              spentTokens: u.spentTokens,
+              cacheReadTokens: u.cacheReadTokens,
+              cacheWriteTokens: u.cacheWriteTokens,
+            }),
+          onCompact: ({ summarizedCount }) => {
+            append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` });
+            void store
+              .fold(conv.id)
+              .catch((e) => console.warn("mid-run fold at compaction failed (run-end fold still will)", e));
+          },
+          onSteer: ({ messages }) => {
+            for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
+          },
+        },
+      });
+      try {
+        convRef.current = await store.fold(conv.id, {
+          messages: transcript,
+          repo: conv.repo ?? workspaceRepo,
+        });
+        setStoreError(null);
+        publisherRef.current?.onSaved();
+        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      } catch (e) {
+        setStoreError(describe(e, NO_STORE_SUFFIX));
+      }
+    } catch (e) {
+      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      if (isJournalRefusal(e)) {
+        setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
+      }
+    } finally {
+      offSteerChange();
+      steerRef.current = null;
+      setQueued([]);
+      setSteerText("");
+      setStreaming("");
+      setThinking("");
+      setRunning(false);
+      runningIdRef.current = null;
+      abortRef.current = null;
+      publisherRef.current?.onRunEnd();
+    }
+  };
+
+  /** Keep the files, end the run: fold the repaired transcript so the journal's
+   *  watermark advances and the conversation closes cleanly. The FILE CHANGES
+   *  STAY — the copy says so (spec §5.3's rev-2 trap). */
+  const keepAndClose = async () => {
+    const store = storeRef.current;
+    const pending = pendingResume;
+    const conv = convRef.current;
+    if (!store || !pending || !conv || pending.convId !== conv.id) return;
+    setPendingResume(null);
+    const repaired = repairTranscript({
+      messages: pending.replay.messages,
+      pendingEffects: pending.replay.pendingEffects,
+      trailingPartial: pending.replay.trailingPartial,
+    });
+    try {
+      convRef.current = await store.fold(conv.id, {
+        messages: repaired.messages,
+        repo: conv.repo ?? workspaceRepo,
+      });
+      setLog(messagesToLog(repaired.messages));
+      setStoreError(null);
+      void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+    } catch (e) {
+      setStoreError(describe(e, NO_STORE_SUFFIX));
+    }
+  };
 
   // R3-333: the OTHER verb. `queue` applies at the next turn boundary (the in-flight
   // turn finishes); `interrupt` ends the in-flight model turn now and continues with
@@ -558,6 +816,27 @@ export default function ConversationStage() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* R3-560 — the attended-resume affordance (R-ARD-15). Renders the work
+          artifact, never a question the user cannot answer; the two offered
+          choices are explicit about scope, and the file changes staying is said
+          plainly. The third spec'd choice (discard + revert the run's writes) is
+          not offered — see the comment above `resumeRun`. */}
+      {pendingResume && !running && (
+        <div className="ca-line ca-error" role="status">
+          <span className="ca-err">
+            This run was interrupted after {pendingResume.replay.journalDepth} steps. You can resume it from its last checkpoint — either way, the file changes so far stay.
+          </span>
+          <div className="ca-resume-row">
+            <button type="button" className="ca-run" onClick={() => void resumeRun()}>
+              Resume run
+            </button>
+            <button type="button" className="ca-steer-btn" onClick={() => void keepAndClose()}>
+              Keep the files and end the run
+            </button>
+          </div>
+        </div>
       )}
 
       {/* One row, two modes. Not running: type a prompt and Run. Running: the same
