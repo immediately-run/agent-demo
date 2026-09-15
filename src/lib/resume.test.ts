@@ -14,7 +14,7 @@ import { runAgent, type ChatMessage, type ModelClient, type ModelResponse } from
 import type { AgentTool } from './agentTools';
 import { createConversationStore, type StoreFs } from './conversationStore';
 import { MemFs } from './testing/memStoreFs';
-import { buildPinnedPrefix, buildLiveSuffix } from './agentPrompt';
+import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt } from './agentPrompt';
 import {
   repairTranscript,
   interrupted,
@@ -241,7 +241,7 @@ describe('resume — attended: booting an interrupted journal executes nothing u
       client,
       tools: TOOLS,
       execute: async () => ({ content: 'r' }),
-      system: pinned + '\n\n' + buildLiveSuffix({ tools: TOOLS }),
+      system: composeSystemPrompt(pinned, buildLiveSuffix({ tools: TOOLS })),
       systemPrefix: pinned,
       resume: { messages: repaired.messages, ...(replay.runState ? { runState: replay.runState } : {}) },
       events: { onBoundary: async (b) => { await store.append(killed.convId, b); } },

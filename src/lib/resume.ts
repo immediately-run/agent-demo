@@ -21,7 +21,9 @@ import type { PendingEffect, ReplayResult } from './conversationStore';
 
 /** The loop's own truncation wording, reused VERBATIM (imported, not re-typed —
  *  one home) for the never-issued case rather than inventing a second phrasing
- *  for the same fact (R-ARD-11). */
+ *  for the same fact (R-ARD-11). The literal itself lives in agentLoop.ts
+ *  (`TRUNCATED_RESULT_TEXT`, whose content ends "— not executed") so the loop
+ *  and the repair can never drift apart. */
 export { TRUNCATED_RESULT_TEXT as NOT_EXECUTED_TEXT };
 
 /** The wording for a call the executor started but whose outcome the journal

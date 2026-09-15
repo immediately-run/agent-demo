@@ -25,7 +25,7 @@ import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent, type RunState } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
-import { openConversationStore, deriveTitle, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
+import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
 import {
   openSessionProjectionWriter,
   createProjectionPublisher,
@@ -44,6 +44,12 @@ import "./CodingAgent.css";
 // R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
 // (history not re-sent) and the durability consequence (a closed tab loses the
 // run). One constant so a fourth call site cannot ship the old copy.
+/** R-ARD-10a: the copy for a checkpoint-append refusal — the run stopped AT a
+//  boundary and everything checkpointed so far survives. One home, used by both
+//  run surfaces’s journal-failure catches. */
+const JOURNAL_REFUSAL_SUFFIX =
+  ", so the run stopped at its last checkpoint — nothing after it was kept";
+
 const NO_STORE_SUFFIX =
   ", so each message is sent without the earlier ones — and a closed tab loses the run, not just the in-flight turn";
 
@@ -101,7 +107,18 @@ export default function ConversationStage() {
   // a run was in flight and never reached its final `runEnd` B4. Resume is
   // ATTENDED (R-ARD-15): rendering this affordance is all the boot path does;
   // no model call, no executor, nothing until the user picks an action.
-  const [pendingResume, setPendingResume] = useState<{ convId: string; replay: ReplayResult } | null>(null);
+  const [pendingResume, setPendingResumeState] = useState<{ convId: string; replay: ReplayResult } | null>(null);
+  // Ref mirror — the attended gate in run() must read the CURRENT value after
+  // awaiting an in-flight replay, which a render-closed state variable cannot give.
+  const pendingResumeRef = useRef<{ convId: string; replay: ReplayResult } | null>(null);
+  const setPendingResume = (v: { convId: string; replay: ReplayResult } | null): void => {
+    pendingResumeRef.current = v;
+    setPendingResumeState(v);
+  };
+  // The boot replay currently in flight, if any — `run()` must not start past an
+  // unresolved interruption check (the TOCTOU hole: a kickoff that slips between
+  // the replay call and its result takes the restart-and-lose-tail path).
+  const replayInFlightRef = useRef<{ convId: string; promise: Promise<void> } | null>(null);
 
   // R3-615 — follow the stream. The transcript and the live reasoning box each pin to
   // their newest row while the reader is at the bottom, and stop the moment they scroll
@@ -167,7 +184,7 @@ export default function ConversationStage() {
     setPendingResume(null);
     const store = storeRef.current;
     if (store?.hasJournal()) {
-      void store
+      const promise = store
         .replay(conv.id)
         .then((r) => {
           if (convRef.current?.id !== conv.id || runningIdRef.current !== null) return;
@@ -180,8 +197,7 @@ export default function ConversationStage() {
           // the conversation is UN-RESUMABLE — say the resume was withheld,
           // never silently best-effort it. Other failures are store faults.
           if (convRef.current?.id !== conv.id) return;
-          const code = (e as { code?: string })?.code ?? '';
-          if (code.startsWith("journal-")) {
+          if (isJournalRefusal(e)) {
             append({
               kind: "error",
               text: "This conversation's checkpoint journal can't be read, so its interrupted run can't be resumed — the saved conversation still opens.",
@@ -189,7 +205,11 @@ export default function ConversationStage() {
           } else {
             setStoreError(describe(e, NO_STORE_SUFFIX));
           }
+        })
+        .finally(() => {
+          if (replayInFlightRef.current?.convId === conv.id) replayInFlightRef.current = null;
         });
+      replayInFlightRef.current = { convId: conv.id, promise };
     }
   }, []);
 
@@ -316,7 +336,15 @@ export default function ConversationStage() {
     // fold-reclaim the interrupted tail — completed tool results vanishing from
     // the transcript while their file effects stay, the exact §0 divergence
     // this item exists to remove. Refuse; the affordance is one row above.
-    if (pendingResume && convRef.current && pendingResume.convId === convRef.current.id) {
+    // The interruption check may still be IN FLIGHT (boot replay) — wait for it
+    // before deciding, or the gate has a hole exactly one tick wide.
+    const convForGate = convRef.current;
+    const inflight = replayInFlightRef.current;
+    if (convForGate && inflight && inflight.convId === convForGate.id) {
+      await inflight.promise;
+    }
+    const pending = pendingResumeRef.current;
+    if (pending && convRef.current && pending.convId === convRef.current.id) {
       append({
         kind: "error",
         text: "This run was interrupted — choose Resume run, or Keep the files and end the run, before starting a new one.",
@@ -499,8 +527,8 @@ export default function ConversationStage() {
       // R3-559 (R-ARD-10a): a failed checkpoint append unwinds the run here. Name
       // the durability consequence — the run stopped AT a boundary and everything
       // checkpointed so far survives (the journal stays resumable).
-      if ((e as { code?: string })?.code?.startsWith('journal-')) {
-        setStoreError(describe(e, ", so the run stopped at its last checkpoint — nothing after it was kept"));
+      if (isJournalRefusal(e)) {
+        setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
       }
     } finally {
       offSteerChange();
@@ -645,8 +673,8 @@ export default function ConversationStage() {
       }
     } catch (e) {
       append({ kind: "error", text: (e as Error)?.message ?? String(e) });
-      if ((e as { code?: string })?.code?.startsWith("journal-")) {
-        setStoreError(describe(e, ", so the run stopped at its last checkpoint — nothing after it was kept"));
+      if (isJournalRefusal(e)) {
+        setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
       }
     } finally {
       offSteerChange();

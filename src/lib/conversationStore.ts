@@ -213,6 +213,13 @@ function boundEntryPayload(b: LoopBoundary): LoopBoundary {
 
 const errWithCode = (code: string, msg: string): Error => Object.assign(new Error(msg), { code });
 
+/** R3-560: did this thrown value come from the journal's fail-closed refusals
+ *  (corrupt / unknown schema / incoherent seq / timeout / unavailability)?
+ *  The ONE predicate — callers never re-type the `journal-` prefix dance, and
+ *  the copy that names the durability consequence lives beside it. */
+export const isJournalRefusal = (e: unknown): boolean =>
+  typeof (e as { code?: string })?.code === 'string' && ((e as { code: string }).code.startsWith('journal-'));
+
 /**
  * Build a store over an explicit fs + roots. The journal tier is a constructor
  * argument, never a branch inside a method (R3-559): `recordRoot` is the synced

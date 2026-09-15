@@ -441,7 +441,7 @@ describe('conversationStore — fold/append concurrency (review round 2)', () =>
     // The durable B2 at seq 4 was not overwritten.
     const entries = entryFiles(fs, conv.id).filter(([, e]) => e.seq >= 3);
     expect(entries.map(([, e]) => e.kind)).toEqual(['B1', 'B2', 'B3']);
-    // And replay still resolves the effect — the entry at seq 3 is intact.
+    // And replay still resolves the effect — the B2 entry at seq 4 is intact.
     const replayed = await s.replay(conv.id);
     expect(replayed.pendingEffects).toEqual([]);
   });
