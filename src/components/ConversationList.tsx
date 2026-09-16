@@ -70,7 +70,10 @@ export default function ConversationList() {
   useEffect(() => {
     if (!effectiveSelected) return;
     void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
-  }, [effectiveSelected]);
+    // R3-648 fault injection (reverted by the next commit): `effectiveSelected` dropped
+    // from the dependency array — a react-hooks/exhaustive-deps WARNING, which is what
+    // this repo's Lint step must now refuse and could not refuse before it existed.
+  }, []);
 
   // The current selection, readable from the IPC listener without re-subscribing it
   // on every change (the stage asks for it when it mounts). Mirrored in an effect,
