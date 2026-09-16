@@ -10,8 +10,10 @@
 # it was not a CI step.
 #
 # Modelled on the merged `whiteboard` workflow deliberately — one shape across the app
-# repos, not a fifth. R3-648 took that shape from `file-explorer`/`editor`; the one place
-# this file departs from it is the Lint step, for the reason stated there.
+# repos, not a new one. R3-648 took that shape from `file-explorer`/`editor`. Two things
+# differ below, and each says why where it sits: the Lint step's invocation, and a note on
+# the Test step. The triggers, permissions, concurrency, action pins and job graph are the
+# sibling's.
 
 name: CI
 
@@ -25,15 +27,21 @@ permissions:
   contents: read
 
 # A newer push to the same ref supersedes an in-flight run — on a PR branch only. A push
-# run gets its own group (the SHA), so it can never be cancelled by a later merge: sharing
-# one group across `main` leaves a superseded commit with a CANCELLED verdict rather than
-# a green one, which matters the moment a check is required or someone bisects `main` by
-# check status.
+# run gets its own group (the SHA), so it can never be cancelled by a later merge.
 #
-# `workflow_dispatch` — the third trigger this workflow declares — takes the non-push arm,
-# so a manual run shares the bare `ci-<ref>` group and is not cancelled in flight.
-# Harmless, and named because it is the one case where GitHub's one-pending-run-per-group
-# rule still applies.
+# `cancel-in-progress: false` alone was not enough, and the first version of this comment
+# in the sibling repos overstated it: the group was still keyed on `github.ref`, and GitHub
+# keeps at most one pending run per group, so a third merge inside the window still
+# cancelled the middle commit's queued run. That moved the threshold from two merges to
+# three rather than removing it. Keying push runs by SHA is what removes it — and a
+# cancelled queued run is what would otherwise leave a superseded commit on `main` with a
+# cancelled verdict rather than a green one, which matters the moment a check is required
+# or someone bisects `main` by check status.
+#
+# `workflow_dispatch` — the third trigger this workflow declares, and the one that fix did
+# not reason about — takes the non-push arm, so a manual run shares the bare `ci-<ref>`
+# group and is not cancelled in flight. Harmless, and named because it is the one remaining
+# case where the one-pending-run-per-group rule still applies.
 concurrency:
   group: ci-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -56,12 +64,12 @@ jobs:
       # `npm run lint` is the gate: `--max-warnings 0` lives in the script, so the string a
       # contributor runs and the string CI runs are the same one.
       #
-      # This is the one place this file departs from the workflow it is modelled on.
-      # R3-648 wrote the step as `npm run lint -- --max-warnings 0` in the three repos it
-      # landed in; R3-653's review found that form leaves `npm run lint` lax and turns the
-      # difference into something a contributor has to know. R3-656 IS MOVING IT — eleven
-      # open PRs as this lands, none merged yet — so this file uses the destination shape
-      # rather than landing the old one and needing a follow-up the same day.
+      # This is the one command in this file that differs from the workflow it is modelled
+      # on. R3-648 wrote the step as `npm run lint -- --max-warnings 0` in the three repos
+      # it landed in; R3-653's review found that form leaves `npm run lint` lax and turns
+      # the difference into something a contributor has to know. R3-656 is moving it —
+      # eleven open PRs as this lands, none merged yet — so this file uses the destination
+      # shape rather than landing the old one and needing a follow-up the same day.
       #
       # Why the flag matters here, measured in this repo on Node 22.22.2 rather than
       # inherited from the sibling that carried the argument: three rules are warn-level
@@ -73,10 +81,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # The repo's OWN `test` script, not a bare `vitest`: it runs
-      # `gen-sdk-skill.mjs --check` first, which is the drift gate for the generated SDK
-      # skill map. A workflow that called the runner directly would skip it and the map
-      # could rot unnoticed — R3-648 Do 2.
+      # `npm test` is the same string the sibling workflows run; what differs is the script
+      # behind it here — `gen-sdk-skill.mjs --check && vitest run`. The first leg is the
+      # drift gate for the generated SDK skill map, and `&&` is what makes this step fail
+      # when the map is stale. Named because a workflow that called `vitest` directly would
+      # skip the gate and the map could rot unnoticed — R3-648 Do 2.
       - name: Test
         run: npm test
 
