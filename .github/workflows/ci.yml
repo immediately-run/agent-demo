@@ -10,10 +10,18 @@
 # it was not a CI step.
 #
 # Modelled on the merged `whiteboard` workflow deliberately — one shape across the app
-# repos, not a new one. R3-648 took that shape from `file-explorer`/`editor`. Two things
-# differ below, and each says why where it sits: the Lint step's invocation, and a note on
-# the Test step. The triggers, permissions, concurrency, action pins and job graph are the
-# sibling's.
+# repos, not a new one. R3-648 took that shape from `file-explorer`/`editor`.
+#
+# Exactly one COMMAND differs, and that is the part worth claiming because it is the part
+# that can be checked:
+#
+#   diff <(grep -vE '^\s*#|^$' whiteboard/.github/workflows/ci.yml) \
+#        <(grep -vE '^\s*#|^$' .github/workflows/ci.yml)
+#   → 24c24 — `npm run lint -- --max-warnings 0` here becomes `npm run lint`
+#
+# The COMMENTS differ in more places than that, and that diff cannot see them because it
+# strips them. So this header enumerates nothing: each comment below that departs from the
+# sibling says so where it sits.
 
 name: CI
 
