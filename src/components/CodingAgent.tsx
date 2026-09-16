@@ -268,11 +268,13 @@ export default function CodingAgent() {
       setThinking("");
       setRunning(false);
       abortRef.current = null;
-      // R3-561: hand the lease back. Fired, not awaited — see the same call in
-      // ConversationStage for why.
+      // R3-561: hand the lease back — the id the RUN held, read before it is
+      // cleared, not whatever is on screen. Fired, not awaited; see
+      // `releaseHeldLease` in ConversationStage for the argument.
       {
-        const c = convRef.current;
-        if (storeRef.current && c) void storeRef.current.releaseRun(c.id).catch(() => {});
+        const store = storeRef.current;
+        const id = runningIdRef.current;
+        if (store && id) void store.releaseRun(id).catch(() => {});
       }
       runningIdRef.current = null;
     }

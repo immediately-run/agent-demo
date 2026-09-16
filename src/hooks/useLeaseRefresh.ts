@@ -31,13 +31,17 @@ export interface LeaseRefreshTarget {
 }
 
 /**
- * While `running`, refresh `convId`'s lease every `LEASE_HEARTBEAT_MS`.
+ * While `running`, refresh the run's lease every `LEASE_HEARTBEAT_MS`.
  *
- * `onLost` fires at most once per run, when a refresh finds the lease is no longer
- * ours. It is for bookkeeping a surface wants (stopping a timer, recording state a
- * later render reads) — not for telling the user, which the append-time catch owns.
- * A refresh that THROWS is not a loss: the mount could not answer, which is no
- * evidence either way, and the TTL decides. `checkHold` takes the same position.
+ * There is no `onLost` callback, deliberately. An earlier version had one and
+ * nothing passed it — and a callback is exactly the seam a later surface would
+ * reach for to put a banner back here, which is the opinion the header above says
+ * this loop does not get to have. Losing the lease stops the loop and nothing
+ * else; the append that follows carries the typed code its caller renders.
+ *
+ * A refresh that THROWS is not a loss either: the mount could not answer, which is
+ * no evidence either way. `checkHold` takes the same position, bounded by the
+ * lease's own expiry.
  */
 export function useLeaseRefresh(
   /** The store, by REF. Both callers hold theirs in one, and
@@ -49,7 +53,6 @@ export function useLeaseRefresh(
    *  hook refreshes the right lease instead of a stale one. */
   convIdRef: RefObject<string | null>,
   running: boolean,
-  onLost?: () => void,
 ): void {
   useEffect(() => {
     if (!running) return;
@@ -64,7 +67,6 @@ export function useLeaseRefresh(
           if (!live || still) return;
           live = false; // nothing left to refresh — stop asking
           clearInterval(timer);
-          onLost?.();
         })
         .catch(() => {
           /* a refresh that cannot run is not a loss — the TTL decides */
@@ -74,9 +76,9 @@ export function useLeaseRefresh(
       live = false;
       clearInterval(timer);
     };
-    // The refs are stable and `onLost` is deliberately not a dependency: a caller
-    // passing an inline arrow would otherwise tear down and re-arm the interval on
-    // every render, which is how a heartbeat silently never fires.
+    // The refs are stable, so `running` is the whole dependency set — and it has to
+    // stay that way: a value dependency that changed per render would tear down and
+    // re-arm the interval each time, which is how a heartbeat silently never fires.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running]);
 }

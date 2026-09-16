@@ -718,6 +718,57 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     expect(await s.holdsRun(conv.id)).toBe(true);
   });
 
+  it('a PERSISTENT read fault is bounded by our own TTL — the hold is not unconditional', async () => {
+    // Round 2 fixed the transient case by keeping the lease on an unreadable mount;
+    // round 3 measured what that bought unbounded. The branch returns BEFORE the
+    // refresh, so a frame whose reads keep failing both kept claiming the lease and
+    // stopped writing heartbeats: across 2.5 TTLs it answered `true` every time,
+    // its stored expiresAt never moved, a second frame's acquireRun answered
+    // `free`, and both minted the same seq — one entry overwriting the other, which
+    // `replay`'s contiguity check cannot see.
+    const fs = new MemFs();
+    let fail = false;
+    const flaky: MemFs = Object.create(fs);
+    flaky.files = fs.files;
+    flaky.readFile = async (path: string): Promise<string> => {
+      if (fail && path.endsWith('lease.json')) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      return fs.readFile(path);
+    };
+    let now = 1_000_000;
+    const a = createConversationStore({
+      recordRoot: '/settings',
+      journalRoot: '/local',
+      fs: flaky,
+      tabId: 'tab-a',
+      now: () => now,
+    });
+    const conv = await a.create('mine');
+    await a.acquireRun(conv.id);
+    fail = true;
+
+    // Inside our own expiry: a fault is not a loss.
+    now += LEASE_TTL_MS - 1;
+    expect(await a.holdsRun(conv.id)).toBe(true);
+
+    // Past it: the lease we are holding through the fault has itself expired, so
+    // the hold ends — and it latches, like any other loss.
+    now += 2;
+    expect(await a.holdsRun(conv.id)).toBe(false);
+    await expect(a.append(conv.id, b('B5', { message: userMsg('still me') }))).rejects.toThrow();
+
+    // Which matters because the other frame is now legitimately free to take it.
+    fail = false;
+    const other = createConversationStore({
+      recordRoot: '/settings',
+      journalRoot: '/local',
+      fs: flaky,
+      tabId: 'tab-b',
+      now: () => now,
+    });
+    expect(await other.acquireRun(conv.id)).toBe('free');
+    expect(await other.append(conv.id, b('B0', { messages: [userMsg('mine now')] }))).toBe(1);
+  });
+
   it('a journalless takeOverRun writes nothing, least of all outside the mounts', async () => {
     // `writeLease` interpolates `journalRoot`, so without its guard this produced
     // `undefined/conversations/<id>/lease.json` — a relative path in neither mount,

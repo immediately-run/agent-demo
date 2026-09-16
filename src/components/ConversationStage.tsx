@@ -185,6 +185,34 @@ export default function ConversationStage() {
   // run's own catch below, from the typed code `append` rejects with.
   useLeaseRefresh(storeRef, runningIdRef, running);
 
+  /**
+   * R3-561 — hand the run's lease back, from both run paths.
+   *
+   * ONE function because there were two copies and the second had already drifted:
+   * `run`'s fired it, `resumeRun`'s awaited it, and the paragraph arguing against
+   * awaiting had been dropped from the second copy. The file held the argument and
+   * its violation ninety lines apart.
+   *
+   * It releases `runningIdRef`, NOT `convRef` — the conversation the RUN held, not
+   * the one on screen. Selecting another conversation mid-run sets `convRef`
+   * (`stageSelection`: "a run for a different conversation does not gate the
+   * reload") while the loop keeps going, so releasing what is on screen freed
+   * nothing and left the real lease to sit out its full TTL — offering a second
+   * window a takeover of a run that had already finished, which is the one thing
+   * this call exists to prevent. Callers invoke it BEFORE clearing `runningIdRef`.
+   *
+   * Fired, never awaited. Failing to run at all is already the expected case (no
+   * unload handler reaches it), so making a run's promise wait on a device-local
+   * read + unlink with no deadline would buy nothing and could leave it pending —
+   * the argument `APPEND_TIMEOUT_MS` makes one file over. The TTL and same-tab
+   * reclaim are what actually free a lease.
+   */
+  const releaseHeldLease = useCallback(() => {
+    const store = storeRef.current;
+    const id = runningIdRef.current;
+    if (store && id) void store.releaseRun(id).catch(() => {});
+  }, []);
+
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
     setConvId(conv.id);
@@ -593,21 +621,10 @@ export default function ConversationStage() {
       setStreaming("");
       setThinking("");
       setRunning(false);
+      releaseHeldLease(); // BEFORE runningIdRef is cleared — it is the id to release
       runningIdRef.current = null;
       abortRef.current = null;
       publisherRef.current?.onRunEnd();
-      // R3-561: hand the lease back at the end of the run, so a second window is
-      // not told to "take over" something that finished. Best-effort by design —
-      // the TTL and same-tab reclaim are what actually free a lease, because no
-      // unload handler can be relied on to reach this line at all. Fired and NOT
-      // awaited for exactly that reason: the whole point is that failing to run it
-      // is already the expected case, so making the run's promise wait on a
-      // device-local read + unlink with no deadline would buy nothing and could
-      // leave it pending — the same argument `APPEND_TIMEOUT_MS` makes one file over.
-      {
-        const c = convRef.current;
-        if (storeRef.current && c) void storeRef.current.releaseRun(c.id).catch(() => {});
-      }
     }
   };
 
@@ -776,17 +793,10 @@ export default function ConversationStage() {
       setStreaming("");
       setThinking("");
       setRunning(false);
+      releaseHeldLease(); // BEFORE runningIdRef is cleared — it is the id to release
       runningIdRef.current = null;
       abortRef.current = null;
       publisherRef.current?.onRunEnd();
-      // R3-561: hand the lease back at the end of the run, so a second window is
-      // not told to "take over" something that finished. Best-effort by design —
-      // the TTL and same-tab reclaim are what actually free a lease, because no
-      // unload handler can be relied on to reach this line at all.
-      {
-        const c = convRef.current;
-        if (storeRef.current && c) await storeRef.current.releaseRun(c.id).catch(() => {});
-      }
     }
   };
 

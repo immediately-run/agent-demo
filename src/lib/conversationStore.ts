@@ -26,6 +26,7 @@ import type {
 import type { Conversation, ConversationMeta } from './conversationModel';
 import {
   LEASE_HEARTBEAT_MS,
+  isExpired,
   leaseVerdict,
   mintLease,
   nextHeartbeat,
@@ -425,10 +426,24 @@ export function createConversationStore(opts: {
     if (!mine) return false;
     const now = clock();
     const stored = await readLease(id);
-    // A mount that could not answer is NOT evidence that we lost the lease. Keep
-    // it and let the TTL decide — the same policy the stage's refresh interval
-    // adopts, and the opposite of what collapsing this into `null` used to do.
-    if (stored === 'unreadable') return true;
+    // A mount that could not answer is NOT evidence that we lost the lease — but
+    // it is not a licence to hold one forever either, and this branch returns
+    // BEFORE the refresh below, so a frame whose reads keep failing would both
+    // keep claiming the lease and stop writing heartbeats. The review gate measured
+    // that: across 2.5 TTLs of persistent EBUSY the frame answered `true` every
+    // time, its stored `expiresAt` never moved, a second frame's `acquireRun`
+    // answered `free`, and both then minted the same `seq` — one entry overwriting
+    // the other, which is the damage `replay`'s contiguity check cannot see.
+    //
+    // So the hold is bounded by the lease we already have, which is what "let the
+    // TTL decide" has to mean if it means anything. A transient fault is harmless
+    // (we are well inside our own expiry); a fault we can no longer justify holding
+    // through stops being a hold, and latches like any other loss.
+    if (stored === 'unreadable') {
+      if (!isExpired(mine, now)) return true;
+      forget(id, true);
+      return false;
+    }
     if (!stillHeld(stored, mine.holderId)) {
       forget(id, true); // taken over, or the conversation was removed under us
       return false;
