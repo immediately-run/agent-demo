@@ -26,7 +26,7 @@ import type {
 import type { Conversation, ConversationMeta } from './conversationModel';
 import {
   LEASE_HEARTBEAT_MS,
-  mayTakeOver,
+  leaseVerdict,
   mintLease,
   nextHeartbeat,
   parseLease,
@@ -57,11 +57,16 @@ const JOURNAL_DIR = 'journal';
  *  business refusing.
  *
  *  It follows that a JOURNALLESS store has no lease. That is coherent rather than
- *  a hole: `append` already rejects `journal-unavailable` before the gate, `seq`
- *  does not exist, and the device-local mount is absent precisely because the
+ *  a hole: `seq` does not exist, `append` rejects `journal-unavailable` whatever
+ *  the lease says, and the device-local mount is absent precisely because the
  *  browser or the capability refused it — the substrate two frames would
  *  coordinate through is the one that is missing. Such a run is degraded and says
- *  so (R-ARD-10); this is one more way in which it is. */
+ *  so (R-ARD-10); this is one more way in which it is.
+ *
+ *  Note the gate is INERT there rather than ordered behind that rejection: with no
+ *  `journalRoot`, `checkHold` answers true and `tryAcquire` answers `free`. An
+ *  earlier comment here claimed the ordering mattered; the review gate moved the
+ *  throw and nothing changed, so the claim is withdrawn rather than left standing. */
 const LEASE_FILE = 'lease.json';
 /** Bounded write (R-ARD-10a): a checkpoint append that has not settled within
  *  this budget is a failure — the loop never executes past an unwritten B2, and
@@ -284,9 +289,13 @@ export function createConversationStore(opts: {
    *  say so (R-ARD-10); `append` rejects `journal-unavailable`. */
   journalRoot?: string;
   /** R3-561 — this FRAME's identity, stable for the life of the document. Same-tab
-   *  reclaim keys on it, so a per-store default would defeat the reclaim the
-   *  moment a frame built a second store. Injected in tests to play two frames. */
-  tabId?: string;
+   *  reclaim keys on it, so a per-store DEFAULT would defeat the reclaim R-ARD-18a
+   *  calls mandatory the moment a frame built a second store — and the panel and
+   *  the stage are exactly that. REQUIRED rather than defaulted for that reason:
+   *  the default this field used to carry was the very thing this comment warns
+   *  against. Production passes `documentTabId()`; tests pass a literal to play
+   *  two frames. */
+  tabId: string;
   /** Injected clock (R3-561). Tests advance it to reach a heartbeat or a TTL
    *  without timers. */
   now?: () => number;
@@ -317,7 +326,7 @@ export function createConversationStore(opts: {
   // ADVISORY, and nothing here may say otherwise. There is no conditional write
   // at the SDK's file surface, so the loser of a race is NOT detected by the
   // store; two frames can both believe they hold a lease. See `lease.ts`.
-  const tabId = opts.tabId ?? genId();
+  const tabId = opts.tabId;
   const clock = opts.now ?? (() => Date.now());
   /** The lease we minted, per conversation, while we believe we hold it. Absent ⇒
    *  this frame may not execute, allocate `seq` or append. */
@@ -355,7 +364,10 @@ export function createConversationStore(opts: {
   const tryAcquire = async (id: string): Promise<LeaseVerdict> => {
     if (!journalRoot) return 'free';
     const now = clock();
-    if (!mayTakeOver(await readLease(id), tabId, now)) return 'held';
+    // `leaseVerdict`, not a second spelling of its body: the rule "takeable ⇒
+    // free" is decided in `lease.ts` and tested there, and a copy here would be a
+    // second place for it to drift.
+    if (leaseVerdict(await readLease(id), tabId, now) === 'held') return 'held';
     await writeLease(id, mintLease(genId(), tabId, now));
     return 'free';
   };
@@ -366,21 +378,31 @@ export function createConversationStore(opts: {
     beatDue.delete(id);
   };
 
-  /** Do we hold the lease, refreshing it if a heartbeat is due? Cheap in the
-   *  common case: no I/O until the beat comes round, so a burst of boundaries
-   *  inside one heartbeat window costs nothing. */
+  /**
+   * Do we hold the lease?
+   *
+   * The stored lease is re-read EVERY time, never cached behind the heartbeat
+   * window. An earlier version skipped the read until a beat was due, and the
+   * review gate measured what that bought: for up to a full `LEASE_HEARTBEAT_MS`
+   * after another frame took over, this one still answered `true` and kept
+   * appending into the new holder's journal. Colliding `seq`s OVERWRITE an entry
+   * rather than leave a gap, so `replay`'s contiguity check — the thing that would
+   * otherwise catch it — cannot see the damage at all. A read per boundary against
+   * the device-local tier is the cheapest correctness there is here.
+   *
+   * The beat still decides whether to WRITE a refresh, which is the expensive half.
+   */
   const checkHold = async (id: string): Promise<boolean> => {
     if (!journalRoot) return true; // nothing to coordinate — see `LEASE_FILE`
     const mine = held.get(id);
     if (!mine) return false;
     const now = clock();
-    if (now < (beatDue.get(id) ?? 0)) return true;
     const stored = await readLease(id);
     if (!stillHeld(stored, mine.holderId)) {
       forget(id, true); // taken over, or the conversation was removed under us
       return false;
     }
-    await writeLease(id, nextHeartbeat(mine, now));
+    if (now >= (beatDue.get(id) ?? 0)) await writeLease(id, nextHeartbeat(mine, now));
     return true;
   };
 
@@ -829,6 +851,13 @@ export function createConversationStore(opts: {
       // The explicit user action behind the `held` offer. It does not consult the
       // stored lease: the point of a takeover is that the user has decided the
       // other window is not really running this.
+      //
+      // The `journalRoot` guard is not decoration. `writeLease` interpolates it,
+      // so without this a journalless store wrote `undefined/conversations/<id>/
+      // lease.json` — a relative path in neither mount — and then reported
+      // `holdsRun` true off the in-memory copy. Every other lease method guards;
+      // this one did not.
+      if (!journalRoot) return;
       await writeLease(convId, mintLease(genId(), tabId, clock()));
     },
 
@@ -840,7 +869,11 @@ export function createConversationStore(opts: {
       if (!mine) return;
       // Only delete a lease that is still OURS — a takeover may have replaced it
       // while we were working, and deleting the new holder's lease would hand the
-      // conversation to whoever asked next.
+      // conversation to whoever asked next. This NARROWS that window, it does not
+      // close it: the read and the unlink are two awaits apart and there is no
+      // conditional delete to make them one, so a takeover landing between them is
+      // still deleted. Said plainly because the rest of this mechanism is careful
+      // not to overclaim.
       const stored = await readLease(convId);
       if (!stillHeld(stored, mine.holderId)) return;
       if (!journalRoot) return;

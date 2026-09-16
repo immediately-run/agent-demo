@@ -771,7 +771,7 @@ describe('R3-559 — boundary emission behaviour', () => {
 
   it('each B3 reuses its B2 effectId, and the pair survives in the journal (R-ARD-5e)', async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
     const conv = await store.create();
     const client = scriptedClient([
       { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: {} }] },
@@ -897,7 +897,7 @@ describe('R3-559 — fault-injection sweep (G-ARD-1 / G-ARD-16)', () => {
     kill: (b: LoopBoundary) => boolean,
   ): Promise<{ store: ReturnType<typeof createConversationStore>; fs: MemFs; convId: string; executeCalls: string[]; err: unknown }> => {
     const fs = new MemFs();
-    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
     const conv = await store.create();
     const sc = makeScenario();
     let err: unknown = null;
@@ -1005,7 +1005,7 @@ describe('R3-559 — fault-injection sweep (G-ARD-1 / G-ARD-16)', () => {
     // Kill inside a model turn: the provider request itself fails after the
     // batch results were checkpointed. Nothing after the failure point exists.
     const fs = new MemFs();
-    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
     const conv = await store.create();
     const sc = makeScenario();
     let modelCall = 0;

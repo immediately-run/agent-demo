@@ -10,7 +10,7 @@ import { MemFs } from './testing/memStoreFs';
 import type { Conversation } from './conversationModel';
 import type { ChatMessage } from './agentLoop';
 
-const store = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', fs });
+const store = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' });
 const userMsg = (text: string): ChatMessage => ({ role: 'user', content: [{ type: 'text', text }] });
 
 afterEach(() => vi.useRealTimers());
@@ -93,8 +93,8 @@ const TOOLS: AgentTool[] = [
 ];
 
 const twoTier = (fs: MemFs) =>
-  createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
-const journalless = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', fs });
+  createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
+const journalless = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' });
 
 const entryFiles = (fs: MemFs, id: string): [string, JournalEntry][] =>
   [...fs.files.entries()]
@@ -351,7 +351,7 @@ describe('conversationStore — a store fault at B2 (G-ARD-14)', () => {
       }
       return fs.writeFile(path, data);
     };
-    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: failingFs });
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: failingFs, tabId: 'tab-test' });
     const conv = await s.create();
     const execute = vi.fn(async () => ({ content: 'r' }));
     const client = {
@@ -417,7 +417,7 @@ describe('conversationStore — fold/append concurrency (review round 2)', () =>
 
   it('a mid-run fold completing AFTER later appends never moves the seq cache backward (no re-minted, overwritten entry)', async () => {
     const { fs, arm, release } = gatedRecordFs();
-    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
     const conv = await s.create();
     await s.append(conv.id, b('B0', { messages: [userMsg('go')] })); // seq 1
     await s.append(conv.id, b('B1', { blocks: [{ type: 'text', text: 'turn one' }] })); // seq 2
@@ -449,7 +449,7 @@ describe('conversationStore — fold/append concurrency (review round 2)', () =>
 
   it('folds serialize per conversation: the second fold waits for the first (no out-of-order watermarks)', async () => {
     const { fs, arm, release, writes } = gatedRecordFs();
-    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
     const conv = await s.create();
     await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
     arm();
@@ -610,11 +610,41 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     await expect(stage.append(conv.id, b('B5', { message: userMsg('next turn') }))).rejects.toMatchObject({
       code: 'conversation-removed',
     });
-    // It does not resurrect the record by folding.
+    // It does not resurrect the record by folding — asserted by actually folding.
+    // The previous version of this case only re-read `load`, which line 3 above had
+    // already asserted over the same fs with nothing mutating in between: it would
+    // have passed whatever `fold` did. The review gate caught that.
+    await expect(stage.fold(conv.id, { messages: [userMsg('running')] })).rejects.toThrow();
     expect(await stage.load(conv.id)).toBeNull();
   });
 
-  it('a heartbeat refreshes without re-reading on every boundary', async () => {
+  it('a taken-over frame stops at its very NEXT append, with no heartbeat-window grace', async () => {
+    // The review gate measured the bug this pins: `checkHold` used to skip the
+    // stored-lease read until a beat was due, so for up to LEASE_HEARTBEAT_MS after
+    // a takeover the old holder still answered `true` and kept appending into the
+    // NEW holder's journal. Colliding seqs OVERWRITE an entry rather than leave a
+    // gap, so `replay`'s contiguity check — the thing that would otherwise catch
+    // it — cannot see the damage at all.
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const a = frame(fs, 'tab-a', () => now);
+    const conv = await a.create('shared');
+    await a.acquireRun(conv.id);
+    await a.append(conv.id, b('B0', { messages: [userMsg('hi')] }));
+
+    await frame(fs, 'tab-b', () => now).takeOverRun(conv.id);
+
+    // Well inside the heartbeat window — the old holder must ALREADY be out.
+    now += 300;
+    expect(await a.holdsRun(conv.id)).toBe(false);
+    await expect(a.append(conv.id, b('B5', { message: userMsg('still me') }))).rejects.toThrow(
+      /does not hold the run lease/,
+    );
+    // And nothing of a's landed on top of b's journal.
+    expect(entryFiles(fs, conv.id).map(([, e]) => e.seq)).toEqual([1]);
+  });
+
+  it('a heartbeat refreshes without REWRITING on every boundary', async () => {
     const fs = new MemFs();
     let now = 1_000_000;
     const s = frame(fs, 'tab-a', () => now);
@@ -623,7 +653,8 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     const expiry = () => parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)!.expiresAt;
     const first = expiry();
 
-    // Inside the heartbeat window: held, and the file is untouched.
+    // Inside the heartbeat window: held, and the file is not rewritten. The READ
+    // happens every time (see the case above); the WRITE is what the beat paces.
     now += LEASE_HEARTBEAT_MS - 1;
     expect(await s.holdsRun(conv.id)).toBe(true);
     expect(expiry()).toBe(first);
@@ -651,7 +682,13 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     expect(parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)).toMatchObject({ tabId: 'tab-b' });
   });
 
-  it('a journalless store has no lease substrate and refuses appends for that reason, not this one', async () => {
+  it('a journalless store has no lease substrate, and its append refuses as journal-unavailable', async () => {
+    // NOT an ordering assertion, and it was wrong to name one: the gate is INERT on
+    // a journalless store — `checkHold` returns true and `tryAcquire` returns
+    // `free` when `journalRoot` is undefined — so moving the `journal-unavailable`
+    // throw to either side of it leaves this case green. The review gate proved
+    // that by moving it. What this pins is the outcome a caller sees, which is what
+    // R-ARD-10 is about.
     const fs = new MemFs();
     const s = journalless(fs);
     const conv = await s.create('no journal');

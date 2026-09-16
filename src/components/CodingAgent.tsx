@@ -150,6 +150,33 @@ export default function CodingAgent() {
         text: "Checkpoints are off (no device-local store) — closing this tab loses the in-flight turn; the conversation itself still saves when the run ends.",
       });
     }
+    // R3-561 / R-ARD-18: take the advisory run lease. This demo is the THIRD opener
+    // of the same store — the panel and the stage are the other two — and it adopts
+    // the NEWEST conversation at mount, so "the agents activity and this tab, same
+    // conversation" is reachable rather than theoretical. Without this the first
+    // append would throw and print internal copy about a lease the user never saw.
+    //
+    // No takeover BUTTON here, deliberately: this surface has no affordance row,
+    // and inventing one for a demo would be the bespoke UI the run-mode rule warns
+    // against. It says what happened and where to act instead, which is the honest
+    // floor. The offer itself lives in ConversationStage.
+    if (store && convRef.current) {
+      try {
+        if ((await store.acquireRun(convRef.current.id)) === "held") {
+          append({
+            kind: "error",
+            text: "Another window may be running this conversation. Only one should drive the files at a time — finish or take it over there, or start a new conversation here.",
+          });
+          setRunning(false);
+          abortRef.current = null;
+          return;
+        }
+      } catch (e) {
+        // A lease we cannot read is not a lease we lost. Say the store is degraded
+        // and run, rather than refusing on an unknown.
+        append(noStoreRow(e));
+      }
+    }
     const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
@@ -209,12 +236,32 @@ export default function CodingAgent() {
       });
       await persist(transcript);
     } catch (e) {
-      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-561: the two lease codes are UX states, not codes to print.
+      const c = (e as { code?: string })?.code;
+      if (c === "conversation-removed") {
+        append({
+          kind: "error",
+          text: "This conversation was deleted while the run was going, so the run stopped here. The file changes it already made stay.",
+        });
+      } else if (c === "lease-lost") {
+        append({
+          kind: "error",
+          text: "Another window took over this conversation, so this one stopped rather than driving the same files. Reopen it there, or start a new conversation here.",
+        });
+      } else {
+        append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      }
     } finally {
       setStreaming("");
       setThinking("");
       setRunning(false);
       abortRef.current = null;
+      // R3-561: hand the lease back. Fired, not awaited — see the same call in
+      // ConversationStage for why.
+      {
+        const c = convRef.current;
+        if (storeRef.current && c) void storeRef.current.releaseRun(c.id).catch(() => {});
+      }
     }
   };
 
