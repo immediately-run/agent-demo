@@ -227,6 +227,13 @@ describe('resume — attended: booting an interrupted journal executes nothing u
     // THE USER ACTS. Only now does a model client exist — and its first request
     // carries the repaired transcript, byte-for-byte, with no synthesised user
     // turn appended to fit the fresh-run shape.
+    //
+    // R3-561: the resume action takes the run lease first, exactly as
+    // `ConversationStage.resumeRun` does. It is needed HERE and not on the boot
+    // path above because the killed run's frame left a live lease behind and this
+    // is a new frame — a reload mid-run is the case R-ARD-18a's takeover offer is
+    // for, and taking the lease is what the user clicking Resume means.
+    await store.takeOverRun(killed.convId);
     const seen: { messages: ChatMessage[]; system?: string; tools: AgentTool[] }[] = [];
     const client: ModelClient = {
       async createMessage(req) {

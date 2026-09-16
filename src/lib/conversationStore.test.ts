@@ -5,6 +5,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 vi.mock('@immediately-run/sdk', () => ({ openSettings: vi.fn() }));
 
 import { createConversationStore, deriveTitle } from './conversationStore';
+import { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, parseLease } from './lease';
 import { MemFs } from './testing/memStoreFs';
 import type { Conversation } from './conversationModel';
 import type { ChatMessage } from './agentLoop';
@@ -462,5 +463,203 @@ describe('conversationStore — fold/append concurrency (review round 2)', () =>
     await release(); // f2's own gated write, if the chain let it start post-f1
     await f2;
     expect(writes.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── R3-561 — the advisory run lease (AGENT_RUN_DURABILITY_SPEC §6) ───────────
+//
+// Two store instances over ONE fake fs are two frames. `tabId` is injected so
+// they are genuinely different frames (a shared tabId would be one tab with two
+// stores, which is the reclaim case, tested separately).
+
+const frame = (fs: MemFs, tabId: string, now?: () => number) =>
+  createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId, ...(now ? { now } : {}) });
+
+describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () => {
+  it('exactly one frame allocates seq; the loser is refused and mints nothing', async () => {
+    const fs = new MemFs();
+    const a = frame(fs, 'tab-a');
+    const conv = await a.create('shared');
+
+    expect(await a.acquireRun(conv.id)).toBe('free');
+    const seq = await a.append(conv.id, b('B0', { messages: [userMsg('hi')] }));
+    expect(seq).toBe(1);
+
+    const loser = frame(fs, 'tab-b');
+    expect(await loser.acquireRun(conv.id)).toBe('held');
+    await expect(loser.append(conv.id, b('B5', { message: userMsg('me too') }))).rejects.toThrow(
+      /does not hold the run lease/,
+    );
+    expect(entryFiles(fs, conv.id).map(([, e]) => e.seq)).toEqual([1]);
+    // …and the holder is unaffected: its next append is seq 2, contiguous.
+    expect(await a.append(conv.id, b('B5', { message: userMsg('carry on') }))).toBe(2);
+  });
+
+  it('the refused frame mints NO seq — the gate is before nextSeq, not after it', async () => {
+    // Why this is its own case: asserting "no entry file appeared" does not catch a
+    // gate placed after `nextSeq`, because the loser's mint is in memory. The
+    // damage shows up LATER — its `lastSeq` cache has advanced, so its first
+    // legitimate append skips a number, and a gap above the fold is exactly what
+    // `replay`'s contiguity check refuses (R3-560 / G-ARD-5).
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const a = frame(fs, 'tab-a', () => now);
+    const conv = await a.create('shared');
+    await a.append(conv.id, b('B0', { messages: [userMsg('hi')] }));
+
+    const other = frame(fs, 'tab-b', () => now);
+    await expect(other.append(conv.id, b('B5', { message: userMsg('me too') }))).rejects.toThrow();
+
+    // The refused frame now takes the lease honestly and appends.
+    now += LEASE_TTL_MS;
+    expect(await other.acquireRun(conv.id)).toBe('free');
+    expect(await other.append(conv.id, b('B5', { message: userMsg('my turn') }))).toBe(2);
+    // Contiguous, and therefore replayable.
+    expect(entryFiles(fs, conv.id).map(([, e]) => e.seq)).toEqual([1, 2]);
+    await expect(other.replay(conv.id)).resolves.toBeTruthy();
+  });
+
+  it('a second frame that never acquires is still refused — the gate is on append, not on politeness', async () => {
+    const fs = new MemFs();
+    const a = frame(fs, 'tab-a');
+    const conv = await a.create('shared');
+    await a.append(conv.id, b('B0', { messages: [userMsg('hi')] })); // implicit acquire
+
+    const loser = frame(fs, 'tab-b');
+    await expect(loser.append(conv.id, b('B5', { message: userMsg('me too') }))).rejects.toThrow(
+      /does not hold the run lease/,
+    );
+  });
+
+  it('teardown then reopen in the SAME tab is free, not held — the canonical flow (R-ARD-18a)', async () => {
+    const fs = new MemFs();
+    const before = frame(fs, 'tab-a');
+    const conv = await before.create('mine');
+    expect(await before.acquireRun(conv.id)).toBe('free');
+    // No unload handler ran — the lease is still minutes from expiry on disk.
+    expect(parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)).toMatchObject({ tabId: 'tab-a' });
+
+    // A fresh store in the SAME frame, as a rail-switch teardown-and-return gives.
+    const after = frame(fs, 'tab-a');
+    expect(await after.acquireRun(conv.id)).toBe('free');
+    await expect(after.append(conv.id, b('B0', { messages: [userMsg('resumed')] }))).resolves.toBe(1);
+  });
+
+  it('a foreign lease frees on its TTL, and takeover is available before that', async () => {
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const a = frame(fs, 'tab-a', () => now);
+    const conv = await a.create('shared');
+    await a.acquireRun(conv.id);
+
+    const bFrame = frame(fs, 'tab-b', () => now);
+    expect(await bFrame.acquireRun(conv.id)).toBe('held');
+    // The offer behind `held`: the user says the other window is not really running it.
+    await bFrame.takeOverRun(conv.id);
+    expect(await bFrame.append(conv.id, b('B0', { messages: [userMsg('mine now')] }))).toBe(1);
+
+    // And without the explicit takeover, the TTL alone frees it.
+    const c = frame(fs, 'tab-c', () => now);
+    expect(await c.acquireRun(conv.id)).toBe('held');
+    now += LEASE_TTL_MS;
+    expect(await c.acquireRun(conv.id)).toBe('free');
+  });
+
+  it('a frame that LOST the lease stops rather than silently taking it back', async () => {
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const a = frame(fs, 'tab-a', () => now);
+    const conv = await a.create('shared');
+    await a.acquireRun(conv.id);
+    await a.append(conv.id, b('B0', { messages: [userMsg('hi')] }));
+
+    await frame(fs, 'tab-b', () => now).takeOverRun(conv.id);
+
+    // a does not notice until its heartbeat comes round — that is the boundary.
+    now += LEASE_HEARTBEAT_MS;
+    expect(await a.holdsRun(conv.id)).toBe(false);
+    await expect(a.append(conv.id, b('B5', { message: userMsg('still me') }))).rejects.toThrow(
+      /does not hold the run lease/,
+    );
+    // The latch: even once b's lease expires, a does not resume on its own.
+    now += LEASE_TTL_MS * 2;
+    await expect(a.append(conv.id, b('B5', { message: userMsg('still me') }))).rejects.toThrow(
+      /does not hold the run lease/,
+    );
+    // Only an explicit ask brings it back.
+    expect(await a.acquireRun(conv.id)).toBe('free');
+    await expect(a.append(conv.id, b('B5', { message: userMsg('asked again') }))).resolves.toBeGreaterThan(1);
+  });
+
+  it('the panel can remove a conversation while a run holds it; the holder finds out at its next boundary (R-ARD-18b)', async () => {
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const stage = frame(fs, 'tab-a', () => now);
+    const conv = await stage.create('doomed');
+    await stage.acquireRun(conv.id);
+    await stage.append(conv.id, b('B0', { messages: [userMsg('running')] }));
+
+    // The panel is the SAME app on the same mount. Its remove is NOT lease-gated.
+    const panel = frame(fs, 'tab-a', () => now);
+    await expect(panel.remove(conv.id)).resolves.toBeUndefined();
+    expect(await panel.load(conv.id)).toBeNull();
+
+    now += LEASE_HEARTBEAT_MS;
+    expect(await stage.holdsRun(conv.id)).toBe(false);
+    // …and it is told WHICH thing happened, not just that it lost a lease.
+    await expect(stage.append(conv.id, b('B5', { message: userMsg('next turn') }))).rejects.toMatchObject({
+      code: 'conversation-removed',
+    });
+    // It does not resurrect the record by folding.
+    expect(await stage.load(conv.id)).toBeNull();
+  });
+
+  it('a heartbeat refreshes without re-reading on every boundary', async () => {
+    const fs = new MemFs();
+    let now = 1_000_000;
+    const s = frame(fs, 'tab-a', () => now);
+    const conv = await s.create('busy');
+    await s.acquireRun(conv.id);
+    const expiry = () => parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)!.expiresAt;
+    const first = expiry();
+
+    // Inside the heartbeat window: held, and the file is untouched.
+    now += LEASE_HEARTBEAT_MS - 1;
+    expect(await s.holdsRun(conv.id)).toBe(true);
+    expect(expiry()).toBe(first);
+
+    // At the beat: refreshed forward, same identity.
+    now += 1;
+    expect(await s.holdsRun(conv.id)).toBe(true);
+    expect(expiry()).toBe(now + LEASE_TTL_MS);
+  });
+
+  it('release frees the lease for another frame, but never deletes a newer holder’s', async () => {
+    const fs = new MemFs();
+    const now = 1_000_000;
+    const a = frame(fs, 'tab-a', () => now);
+    const conv = await a.create('shared');
+    await a.acquireRun(conv.id);
+    await a.releaseRun(conv.id);
+    expect(fs.files.has(`/local/conversations/${conv.id}/lease.json`)).toBe(false);
+
+    // A stale releaser must not evict whoever holds it now.
+    const stale = frame(fs, 'tab-a', () => now);
+    await stale.acquireRun(conv.id);
+    await frame(fs, 'tab-b', () => now).takeOverRun(conv.id);
+    await stale.releaseRun(conv.id);
+    expect(parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)).toMatchObject({ tabId: 'tab-b' });
+  });
+
+  it('a journalless store has no lease substrate and refuses appends for that reason, not this one', async () => {
+    const fs = new MemFs();
+    const s = journalless(fs);
+    const conv = await s.create('no journal');
+    expect(await s.acquireRun(conv.id)).toBe('free');
+    expect(await s.holdsRun(conv.id)).toBe(true);
+    await expect(s.append(conv.id, b('B0', { messages: [userMsg('hi')] }))).rejects.toMatchObject({
+      code: 'journal-unavailable',
+    });
+    await expect(s.releaseRun(conv.id)).resolves.toBeUndefined();
   });
 });
