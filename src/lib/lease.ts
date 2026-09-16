@@ -40,17 +40,34 @@
 // PURE. Clock injected, no timers, no fs — the store integration is the thin part.
 // Same shape as `steering.ts`.
 
-/** How long a lease stays live after its last refresh. Generous against a frame
- *  that is merely slow (a long tool call, a backgrounded tab throttling its
- *  timers), because the cost of expiring early is a spurious takeover offer while
- *  the cost of expiring late is only that a genuinely dead frame's lease lingers —
- *  and same-tab reclaim already covers the common teardown. */
+/** How long a lease stays live after its last refresh. The cost of expiring early
+ *  is a spurious takeover offer; the cost of expiring late is only that a
+ *  genuinely dead frame's lease lingers, and same-tab reclaim already covers the
+ *  common teardown — so this is sized generously against the refresh cadence
+ *  below rather than against any guess about how slow a frame might be. */
 export const LEASE_TTL_MS = 60_000;
 
-/** Refresh cadence. A third of the TTL, so two consecutive missed heartbeats (a
- *  throttled background tab, a slow synced-mount write) still leave the lease
- *  live. */
-export const LEASE_HEARTBEAT_MS = 20_000;
+/**
+ * Refresh cadence, and the TTL is STRICTLY MORE than three times it — so two
+ * consecutively missed beats still leave the lease live, with the third tick
+ * landing inside the window rather than exactly on its edge.
+ *
+ * The strictness is the whole point and it was wrong here for a round. At exactly
+ * a third, a tick at `t` sets `expiresAt = t + TTL`; miss the next two and the
+ * following tick lands at `t + 3×cadence` = `expiresAt`, and `isExpired` is
+ * `now >= expiresAt` — already gone at the instant it would have refreshed. And
+ * `setInterval` drift only ever pushes a tick LATER. So the margin was zero, not
+ * two beats. `lease.test.ts` now asserts the inequality rather than trusting the
+ * numbers.
+ *
+ * What this does NOT cover, said plainly because the old comment claimed it did:
+ * a **hidden tab**. Chrome clamps timers in a page hidden more than five minutes
+ * to roughly once per minute, which is at most one tick per TTL — no slack at
+ * all. What actually keeps such a run's lease alive is the boundary appends,
+ * every one of which refreshes through `checkHold`. The timer is for the case
+ * boundaries cannot cover: one long model turn in a VISIBLE tab.
+ */
+export const LEASE_HEARTBEAT_MS = 15_000;
 
 /** The lease file's contents — `{holderId, tabId, expiresAt}`, and nothing else.
  *  It lives beside the conversation, never on the record. */

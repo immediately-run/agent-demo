@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeStoreFailure, unwrapSuppressed } from "./storeError";
+import { describeStoreFailure, unwrapSuppressed, leaseFailure, leaseFailureText, leaseHeldText } from "./storeError";
 
 /** Build a real SuppressedError the way the engine does for a failed `await using`:
  *  `error` is what disposal threw, `suppressed` is the original body failure. */
@@ -70,5 +70,60 @@ describe("describeStoreFailure", () => {
 
   it("falls back to the message when there is no code", () => {
     expect(describeStoreFailure(new Error("mount gone"))).toContain("mount gone");
+  });
+});
+
+// ── R3-561: the lease failure mapping ────────────────────────────────────────
+//
+// This exists because the discrimination was first pasted into two component
+// catches and the third was missed. A test here is the other half of moving it:
+// the copy is now checkable, which it was not in a `.tsx` (this repo has no
+// component-test harness at all).
+
+describe("leaseFailure / leaseFailureText / leaseHeldText (R3-561)", () => {
+  it("recognises exactly the two lease codes and nothing else", () => {
+    expect(leaseFailure({ code: "lease-lost" })).toBe("lease-lost");
+    expect(leaseFailure({ code: "conversation-removed" })).toBe("conversation-removed");
+    for (const other of [
+      { code: "journal-unavailable" },
+      { code: "journal-timeout" },
+      { code: "ENOENT" },
+      { code: "" },
+      new Error("this frame does not hold the run lease"),
+      null,
+      undefined,
+      "lease-lost", // the string, not an error carrying the code
+    ]) {
+      expect(leaseFailure(other)).toBeNull();
+    }
+  });
+
+  it("never returns the internal message — the codes are UX states, not text to print", () => {
+    // The regression this guards: both outcomes used to reach the user as the
+    // literal "this frame does not hold the run lease".
+    for (const failure of ["lease-lost", "conversation-removed"] as const) {
+      for (const canTakeOver of [true, false]) {
+        const text = leaseFailureText(failure, canTakeOver);
+        expect(text).not.toMatch(/lease/i);
+        expect(text.length).toBeGreaterThan(40);
+      }
+    }
+  });
+
+  it("offers a takeover only where there is one, and otherwise names what actually frees it", () => {
+    // R-ARD-18a forbids a dead end. A surface with no affordance row must not name
+    // a button it does not ship — it names the TTL, which is true and actionable.
+    expect(leaseFailureText("lease-lost", true)).toMatch(/take it back below/);
+    expect(leaseFailureText("lease-lost", false)).not.toMatch(/below/);
+    expect(leaseFailureText("lease-lost", false)).toMatch(/frees up on its own/);
+
+    expect(leaseHeldText(true)).toMatch(/take over/i);
+    expect(leaseHeldText(false)).not.toMatch(/take over/i);
+    expect(leaseHeldText(false)).toMatch(/frees up on its own/);
+  });
+
+  it("says the same thing about a deleted conversation either way — there is nothing to take over", () => {
+    expect(leaseFailureText("conversation-removed", true)).toBe(leaseFailureText("conversation-removed", false));
+    expect(leaseFailureText("conversation-removed", true)).toMatch(/deleted/);
   });
 });

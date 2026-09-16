@@ -111,9 +111,17 @@ describe('mintLease / nextHeartbeat', () => {
     expect(stillHeld(beat, held.holderId)).toBe(true);
   });
 
-  it('heartbeats faster than the TTL, with room for two missed beats', () => {
-    // A backgrounded tab throttles timers; one missed beat must not expire us.
-    expect(LEASE_HEARTBEAT_MS * 2).toBeLessThan(LEASE_TTL_MS);
+  it('leaves room for two consecutively missed beats — STRICTLY, not exactly', () => {
+    // The inequality, not the numbers: at exactly 3x, the tick after two missed
+    // ones lands ON `expiresAt`, and `isExpired` is `now >= expiresAt`, so the
+    // lease is already gone at the instant it would have been refreshed. This
+    // asserts the property so the constants cannot drift back onto the edge.
+    expect(LEASE_HEARTBEAT_MS * 3).toBeLessThan(LEASE_TTL_MS);
+
+    // Driven through the real functions rather than by arithmetic alone.
+    const held = mintLease('run-9', OURS, T0);
+    const thirdTick = T0 + LEASE_HEARTBEAT_MS * 3;
+    expect(isExpired(held, thirdTick)).toBe(false);
   });
 });
 

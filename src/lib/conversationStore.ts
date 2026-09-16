@@ -341,13 +341,34 @@ export function createConversationStore(opts: {
   const lost = new Set<string>();
   const leaseFile = (id: string): string => `${journalRoot}/${DIR}/${id}/${LEASE_FILE}`;
 
-  const readLease = async (id: string): Promise<Lease | null> => {
+  /**
+   * Read the stored lease.
+   *
+   * THREE outcomes, not two, and the third is load-bearing:
+   *   - a `Lease`         — it is there and well-formed
+   *   - `null`            — genuinely ABSENT (ENOENT, or bytes `parseLease` refuses)
+   *   - `'unreadable'`    — the mount could not answer
+   *
+   * Collapsing the third into `null` is a real bug, not a tidiness question,
+   * because the two callers want OPPOSITE defaults from it. `tryAcquire` is
+   * deciding whether it may start, so absent-reads-as-takeable is right there —
+   * fail toward letting the user work. `checkHold` is asking whether it still
+   * holds, and reading a fault as "someone took it" both ends the run and LATCHES
+   * the frame out, while our own unexpired lease is still on disk. The review gate
+   * measured it: one injected `EBUSY` refused every later append for the session
+   * and told the user another window had taken over, which had not happened.
+   */
+  const readLease = async (id: string): Promise<Lease | null | 'unreadable'> => {
     if (!journalRoot) return null;
+    let raw: string;
     try {
-      return parseLease(await p.readFile(leaseFile(id), 'utf8'));
-    } catch {
-      return null; // ENOENT, or a mount that cannot answer — reads as absent
+      raw = await p.readFile(leaseFile(id), 'utf8');
+    } catch (e) {
+      // ENOENT is the ordinary "no lease yet". Anything else is the mount failing
+      // to answer a question we asked, which is not evidence about the lease.
+      return code(e) === 'ENOENT' ? null : 'unreadable';
     }
+    return parseLease(raw); // malformed bytes ARE absence — `parseLease` says why
   };
 
   const writeLease = async (id: string, lease: Lease): Promise<void> => {
@@ -364,10 +385,16 @@ export function createConversationStore(opts: {
   const tryAcquire = async (id: string): Promise<LeaseVerdict> => {
     if (!journalRoot) return 'free';
     const now = clock();
+    const stored = await readLease(id);
+    // An unreadable mount reads as takeable HERE, deliberately: this caller is
+    // deciding whether the user may start, and refusing on a fault would strand
+    // them behind a lease nobody can even read. The opposite default belongs to
+    // `checkHold` — see `readLease`.
+    //
     // `leaseVerdict`, not a second spelling of its body: the rule "takeable ⇒
     // free" is decided in `lease.ts` and tested there, and a copy here would be a
     // second place for it to drift.
-    if (leaseVerdict(await readLease(id), tabId, now) === 'held') return 'held';
+    if (leaseVerdict(stored === 'unreadable' ? null : stored, tabId, now) === 'held') return 'held';
     await writeLease(id, mintLease(genId(), tabId, now));
     return 'free';
   };
@@ -398,6 +425,10 @@ export function createConversationStore(opts: {
     if (!mine) return false;
     const now = clock();
     const stored = await readLease(id);
+    // A mount that could not answer is NOT evidence that we lost the lease. Keep
+    // it and let the TTL decide — the same policy the stage's refresh interval
+    // adopts, and the opposite of what collapsing this into `null` used to do.
+    if (stored === 'unreadable') return true;
     if (!stillHeld(stored, mine.holderId)) {
       forget(id, true); // taken over, or the conversation was removed under us
       return false;
@@ -875,7 +906,7 @@ export function createConversationStore(opts: {
       // still deleted. Said plainly because the rest of this mechanism is careful
       // not to overclaim.
       const stored = await readLease(convId);
-      if (!stillHeld(stored, mine.holderId)) return;
+      if (stored === 'unreadable' || !stillHeld(stored, mine.holderId)) return;
       if (!journalRoot) return;
       try {
         await p.unlink(leaseFile(convId));

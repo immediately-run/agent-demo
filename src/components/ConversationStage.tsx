@@ -25,7 +25,7 @@ import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent, type RunState } from "../lib/agentLoop";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
-import { LEASE_HEARTBEAT_MS } from "../lib/lease";
+import { useLeaseRefresh } from "../hooks/useLeaseRefresh";
 import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
 import {
   openSessionProjectionWriter,
@@ -39,7 +39,7 @@ import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
-import { describeStoreFailure as describe } from "../lib/storeError";
+import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
 
 // R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
@@ -177,36 +177,13 @@ export default function ConversationStage() {
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
-  // R3-561 / R-ARD-18 — the lease is "refreshed on an interval WHILE THE RUN
-  // EXECUTES", and this is that interval. It cannot be boundary-driven: `holdsRun`
-  // refreshes, but the loop only reaches a boundary after the model turn returns,
-  // and a single slow turn routinely outlasts `LEASE_TTL_MS`. A running frame
-  // would then let its own lease expire and a second tab would read `free` — the
-  // double-drive the lease exists to prevent, arriving through the mechanism meant
-  // to prevent it.
-  //
-  // `holdsRun` returning false means we lost it mid-run. We do NOT stop the loop
-  // here: the run is between boundaries, its tool call is in flight, and the
-  // honest stopping point is the next append, which rejects `lease-lost` and is
-  // rendered by the catch above. What this does is raise the offer immediately
-  // rather than leaving the user watching a run that is already doomed.
-  useEffect(() => {
-    if (!running) return;
-    const id = runningIdRef.current;
-    const store = storeRef.current;
-    if (!id || !store) return;
-    const t = setInterval(() => {
-      void store
-        .holdsRun(id)
-        .then((still) => {
-          if (!still) setLeaseHeld({ convId: id, resume: false });
-        })
-        .catch(() => {
-          /* a refresh that cannot run is not a loss — the TTL decides */
-        });
-    }, LEASE_HEARTBEAT_MS);
-    return () => clearInterval(t);
-  }, [running]);
+  // R3-561 / R-ARD-18: refresh the lease on an interval while the run executes.
+  // Shared with CodingAgent — the other run surface — rather than living here; see
+  // `useLeaseRefresh` for why the boundary appends are not enough on their own,
+  // and for why this loop does NOT raise the takeover offer (it cannot: the banner
+  // renders only when the run is not running). A lost lease is surfaced by the
+  // run's own catch below, from the typed code `append` rejects with.
+  useLeaseRefresh(storeRef, runningIdRef, running);
 
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
@@ -590,21 +567,15 @@ export default function ConversationStage() {
         }
       }
     } catch (e) {
-      // R3-561: the two lease codes are UX states, not codes to print. Without
-      // this branch both reach the user as "this frame does not hold the run
-      // lease", which is internal copy naming a mechanism they never saw.
-      const c = (e as { code?: string })?.code;
-      if (c === "conversation-removed") {
-        append({
-          kind: "error",
-          text: "This conversation was deleted while the run was going, so the run stopped here. The file changes it already made stay.",
-        });
-      } else if (c === "lease-lost") {
-        append({
-          kind: "error",
-          text: "Another window took over this conversation, so this one stopped rather than driving the same files. Nothing here was lost — reopen it there, or take it back below.",
-        });
-        setLeaseHeld({ convId: runningIdRef.current ?? convRef.current?.id ?? "", resume: false });
+      // R3-561: the two lease codes are UX states, not codes to print (§9). The
+      // discrimination and the copy live in `lib/storeError` — pasting them here
+      // is what made the resume catch below get missed the first time.
+      const lease = leaseFailure(e);
+      if (lease) {
+        append({ kind: "error", text: leaseFailureText(lease, true) });
+        if (lease === "lease-lost") {
+          setLeaseHeld({ convId: runningIdRef.current ?? convRef.current?.id ?? "", resume: false });
+        }
       } else {
         append({ kind: "error", text: (e as Error)?.message ?? String(e) });
       }
@@ -781,7 +752,19 @@ export default function ConversationStage() {
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     } catch (e) {
-      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-561: the same mapping as `run`'s catch. This is the path the takeover
+      // button itself invokes, so a user who takes over a resumable run and loses
+      // the lease again lands here — it printed the raw internal string until the
+      // discrimination moved into `lib/storeError`.
+      const lease = leaseFailure(e);
+      if (lease) {
+        append({ kind: "error", text: leaseFailureText(lease, true) });
+        if (lease === "lease-lost") {
+          setLeaseHeld({ convId: runningIdRef.current ?? convRef.current?.id ?? "", resume: true });
+        }
+      } else {
+        append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      }
       if (isJournalRefusal(e)) {
         setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
       }
@@ -961,10 +944,7 @@ export default function ConversationStage() {
           twice. */}
       {leaseHeld && !running && leaseHeld.convId === convId && (
         <div className="ca-line ca-error" role="status">
-          <span className="ca-err">
-            Another window may be running this conversation. Only one should drive the files at a time — take over if
-            that window is gone.
-          </span>
+          <span className="ca-err">{leaseHeldText(true)}</span>
           <div className="ca-resume-row">
             <button
               type="button"

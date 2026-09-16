@@ -682,6 +682,56 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     expect(parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)).toMatchObject({ tabId: 'tab-b' });
   });
 
+  it('a transient read fault does NOT read as a takeover — the lease is kept and the TTL decides', async () => {
+    // The review gate measured the bug this pins. Round 1 moved the stored-lease
+    // read onto every boundary, which was right, but `readLease` collapsed EVERY
+    // fault into `null` and `checkHold` reads `null` as "someone took it" — and
+    // latches. So one transient EBUSY ended the run, refused every later append for
+    // the session, and told the user another window had taken over, while our own
+    // unexpired lease with our own holderId was still sitting on disk.
+    const fs = new MemFs();
+    let fail = false;
+    const flaky: MemFs = Object.create(fs);
+    flaky.files = fs.files;
+    flaky.readFile = async (path: string): Promise<string> => {
+      if (fail && path.endsWith('lease.json')) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      return fs.readFile(path);
+    };
+    const now = 1_000_000;
+    const s = createConversationStore({
+      recordRoot: '/settings',
+      journalRoot: '/local',
+      fs: flaky,
+      tabId: 'tab-a',
+      now: () => now,
+    });
+    const conv = await s.create('mine');
+    await s.acquireRun(conv.id);
+    await s.append(conv.id, b('B0', { messages: [userMsg('hi')] }));
+
+    fail = true;
+    expect(await s.holdsRun(conv.id)).toBe(true); // a fault is not evidence of loss
+    await expect(s.append(conv.id, b('B5', { message: userMsg('still me') }))).resolves.toBe(2);
+    fail = false;
+    // …and nothing latched: the lease on disk is still ours, untouched.
+    expect(parseLease(fs.files.get(`/local/conversations/${conv.id}/lease.json`)!)).toMatchObject({ tabId: 'tab-a' });
+    expect(await s.holdsRun(conv.id)).toBe(true);
+  });
+
+  it('a journalless takeOverRun writes nothing, least of all outside the mounts', async () => {
+    // `writeLease` interpolates `journalRoot`, so without its guard this produced
+    // `undefined/conversations/<id>/lease.json` — a relative path in neither mount,
+    // which `remove`'s `rmTree` (itself journalRoot-gated) never reclaims. The
+    // guard went in on round 1 with nothing holding it down.
+    const fs = new MemFs();
+    const s = journalless(fs);
+    const conv = await s.create('no journal');
+    await s.takeOverRun(conv.id);
+    expect([...fs.files.keys()].filter((k) => !k.startsWith('/settings/'))).toEqual([]);
+    await s.releaseRun(conv.id);
+    expect([...fs.files.keys()].filter((k) => !k.startsWith('/settings/'))).toEqual([]);
+  });
+
   it('a journalless store has no lease substrate, and its append refuses as journal-unavailable', async () => {
     // NOT an ordering assertion, and it was wrong to name one: the gate is INERT on
     // a journalless store — `checkHold` returns true and `tryAcquire` returns
