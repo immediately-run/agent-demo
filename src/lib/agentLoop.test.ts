@@ -15,6 +15,7 @@ import {
   type RunState,
 } from './agentLoop';
 import type { AgentTool } from './agentTools';
+import type { PauseSource } from '@immediately-run/sdk';
 
 // The fault-injection sweep (G-ARD-1) replays through the REAL store; mocking the
 // SDK barrel keeps vitest from loading the full SDK (same reason as
@@ -551,6 +552,134 @@ describe('runAgent — mid-stream abort / stop button (R3-224 §3.3)', () => {
     await expect(
       runAgent({ client, tools: TOOLS, execute: async () => ({ content: 'r' }), prompt: 'go', signal: ctrl.signal }),
     ).rejects.toThrow(/genuine provider failure/);
+  });
+});
+
+// ---- R3-562: pause at the turn boundary (AGENT_RUN_DURABILITY_SPEC §7 R-ARD-20a) ----
+
+describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)', () => {
+  // The seam is faked, not the SDK's PauseController: the loop owes only the two
+  // verbs (isPaused / whenResumed), and the fake keeps these tests independent of
+  // the SDK barrel this file mocks. It carries the real controller's semantics —
+  // the abort-resolving whenResumed is the load-bearing one (a run stopped while
+  // hidden must not await a reveal that never comes).
+  class FakePause implements PauseSource {
+    private paused = false;
+    private waiters = new Set<() => void>();
+    set(paused: boolean): void {
+      if (this.paused === paused) return;
+      this.paused = paused;
+      if (!paused) for (const w of [...this.waiters]) w();
+    }
+    isPaused(): boolean {
+      return this.paused;
+    }
+    whenResumed(signal?: AbortSignal): Promise<void> {
+      if (!this.paused || signal?.aborted) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const done = (): void => {
+          this.waiters.delete(done);
+          signal?.removeEventListener('abort', done);
+          resolve();
+        };
+        this.waiters.add(done);
+        signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+  }
+
+  it('a pause delivered mid-batch takes effect at the NEXT turn boundary, with every tool_use still paired', async () => {
+    const pause = new FakePause();
+    const client = scriptedClient([
+      { stopReason: 'tool_use', content: [
+        { type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: { n: 1 } },
+        { type: 'tool_use', id: 'tu_2', name: 'spaces__share', input: { n: 2 } },
+      ] },
+      { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+    ]);
+    // The executor pauses the run from INSIDE the first call — mid-batch. The batch
+    // must still complete (pausing never splits a batch: tu_2 would lose its
+    // tool_result and the next request would be malformed); it is the SECOND model
+    // turn that waits for the reveal.
+    const execute = vi.fn(async () => {
+      if (execute.mock.calls.length === 1) pause.set(true);
+      return { content: 'ok' };
+    });
+    const onPause = vi.fn();
+    const onResume = vi.fn();
+    const onBoundary = vi.fn();
+
+    const runP = runAgent({
+      client, tools: TOOLS, execute, prompt: 'go', pause,
+      events: { onPause, onResume, onBoundary },
+    });
+
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    // One macrotask drains every pending microtask: the loop has reached the next
+    // turn boundary and is parked in whenResumed. The second model turn has NOT
+    // been requested — parked, not proceeding.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(client.calls).toBe(1);
+    expect(onPause).toHaveBeenCalledWith({ turn: 1 });
+
+    pause.set(false); // the reveal
+    const transcript = await runP;
+    expect(client.calls).toBe(2);
+    expect(onResume).toHaveBeenCalledWith({ turn: 1 });
+
+    // Pairing across the pause: both tool_uses from the pre-pause batch have their
+    // tool_results, in order — the transcript a provider would accept.
+    const uses = transcript.flatMap((m) => m.content).filter((b) => b.type === 'tool_use');
+    const results = transcript.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
+    expect(uses.map((b) => (b as { id: string }).id)).toEqual(['tu_1', 'tu_2']);
+    expect(results.map((b) => (b as { tool_use_id: string }).tool_use_id)).toEqual(['tu_1', 'tu_2']);
+    // And the pause left no mark in the journal: the boundary sequence is exactly the
+    // unpaused one (B0, B1, then B2/B3 interleaved per call, the batch B4, the final
+    // turn's B1, and the run-end B4) — no pause marker exists.
+    expect(onBoundary.mock.calls.map(([b]) => (b as LoopBoundary).kind)).toEqual([
+      'B0', 'B1', 'B2', 'B3', 'B2', 'B3', 'B4', 'B1', 'B4',
+    ]);
+  });
+
+  it('a run stopped while hidden ends cleanly — whenResumed resolves on the stop signal, no hang', async () => {
+    const pause = new FakePause();
+    const client = scriptedClient([
+      { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: {} }] },
+      { stopReason: 'end_turn', content: [{ type: 'text', text: 'never requested' }] },
+    ]);
+    const execute = vi.fn(async () => {
+      pause.set(true); // hidden from inside the tool call
+      return { content: 'ok' };
+    });
+    const ctrl = new AbortController();
+
+    const runP = runAgent({ client, tools: TOOLS, execute, prompt: 'go', pause, signal: ctrl.signal });
+    await vi.waitFor(() => expect(execute).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0)); // parked at the boundary, hidden
+
+    ctrl.abort(); // Stop — while nobody can see
+    const transcript = await runP; // must resolve, not await a reveal that never comes
+
+    expect(client.calls).toBe(1);
+    // The transcript keeps the completed batch: prompt, assistant(tool_use), user(tool_result).
+    expect(transcript).toHaveLength(3);
+    expect(transcript[2].content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'tu_1' });
+  });
+
+  it('a run that starts hidden executes nothing until the reveal (R-ARD-15: no unattended writes)', async () => {
+    const pause = new FakePause();
+    pause.set(true); // hidden before the first turn
+    const client = scriptedClient([{ stopReason: 'end_turn', content: [{ type: 'text', text: 'hi' }] }]);
+
+    const runP = runAgent({ client, tools: TOOLS, execute: async () => ({ content: 'r' }), prompt: 'go', pause });
+    await new Promise((r) => setTimeout(r, 0));
+    // Not one model call while nobody can see or stop the run.
+    expect(client.calls).toBe(0);
+
+    pause.set(false);
+    const transcript = await runP;
+    expect(client.calls).toBe(1);
+    expect(transcript).toHaveLength(2);
   });
 });
 
