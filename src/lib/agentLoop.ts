@@ -311,8 +311,8 @@ export interface RunAgentOptions {
    *  exactly as before. */
   steering?: SteerSource;
   /** R3-562 (AGENT_RUN_DURABILITY_SPEC §7 R-ARD-20a): pause the run while nobody can
-   *  see it. The host keeps a hidden region MOUNTED (no reboot, no teardown), so the
-   *  run pauses at its NEXT turn boundary — never mid-turn, never mid-batch, so every
+   *  see it. The host keeps a hidden region mounted (no reboot, no teardown), so the
+   *  run pauses at its next turn boundary — never mid-turn, never mid-batch, so every
    *  `tool_use` keeps its `tool_result` — and continues on reveal with no repair pass
    *  and no resume gate. Omitted ⇒ the loop never pauses, exactly as before. */
   pause?: PauseSource;
@@ -647,7 +647,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     // halts "the loop between tool calls AND aborts the in-flight LLM request".
     if (signal?.aborted) break;
 
-    // R3-562 (§7 R-ARD-20a): if the region is hidden, stop HERE — at the boundary, with
+    // R3-562 (§7 R-ARD-20a): if the region is hidden, stop here — at the boundary, with
     // the previous turn's tool batch fully paired — and wait for the reveal. Placed after
     // the stop check and before the steer drain so a correction queued while hidden is
     // applied on the way back in, as the very next turn, rather than a turn late. Pause

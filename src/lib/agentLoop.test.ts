@@ -15,7 +15,11 @@ import {
   type RunState,
 } from './agentLoop';
 import type { AgentTool } from './agentTools';
-import type { PauseSource } from '@immediately-run/sdk';
+// The real pause controller, via the package's `agentPause` subpath: the module
+// is self-contained, so the import does not load the SDK barrel this file mocks
+// — which is exactly what lets the loop's pause cases run against the
+// controller the app will actually hold.
+import { PauseController } from '@immediately-run/sdk/agentPause';
 
 // The fault-injection sweep (G-ARD-1) replays through the REAL store; mocking the
 // SDK barrel keeps vitest from loading the full SDK (same reason as
@@ -558,38 +562,8 @@ describe('runAgent — mid-stream abort / stop button (R3-224 §3.3)', () => {
 // ---- R3-562: pause at the turn boundary (AGENT_RUN_DURABILITY_SPEC §7 R-ARD-20a) ----
 
 describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)', () => {
-  // The seam is faked, not the SDK's PauseController: the loop owes only the two
-  // verbs (isPaused / whenResumed), and the fake keeps these tests independent of
-  // the SDK barrel this file mocks. It carries the real controller's semantics —
-  // the abort-resolving whenResumed is the load-bearing one (a run stopped while
-  // hidden must not await a reveal that never comes).
-  class FakePause implements PauseSource {
-    private paused = false;
-    private waiters = new Set<() => void>();
-    set(paused: boolean): void {
-      if (this.paused === paused) return;
-      this.paused = paused;
-      if (!paused) for (const w of [...this.waiters]) w();
-    }
-    isPaused(): boolean {
-      return this.paused;
-    }
-    whenResumed(signal?: AbortSignal): Promise<void> {
-      if (!this.paused || signal?.aborted) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        const done = (): void => {
-          this.waiters.delete(done);
-          signal?.removeEventListener('abort', done);
-          resolve();
-        };
-        this.waiters.add(done);
-        signal?.addEventListener('abort', done, { once: true });
-      });
-    }
-  }
-
-  it('a pause delivered mid-batch takes effect at the NEXT turn boundary, with every tool_use still paired', async () => {
-    const pause = new FakePause();
+  it('a pause delivered mid-batch takes effect at the next turn boundary, with every tool_use still paired', async () => {
+    const pause = new PauseController();
     const client = scriptedClient([
       { stopReason: 'tool_use', content: [
         { type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: { n: 1 } },
@@ -597,9 +571,9 @@ describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)',
       ] },
       { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
     ]);
-    // The executor pauses the run from INSIDE the first call — mid-batch. The batch
+    // The executor pauses the run from inside the first call — mid-batch. The batch
     // must still complete (pausing never splits a batch: tu_2 would lose its
-    // tool_result and the next request would be malformed); it is the SECOND model
+    // tool_result and the next request would be malformed); it is the second model
     // turn that waits for the reveal.
     const execute = vi.fn(async () => {
       if (execute.mock.calls.length === 1) pause.set(true);
@@ -616,7 +590,7 @@ describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)',
 
     await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
     // One macrotask drains every pending microtask: the loop has reached the next
-    // turn boundary and is parked in whenResumed. The second model turn has NOT
+    // turn boundary and is parked in whenResumed. The second model turn has not
     // been requested — parked, not proceeding.
     await new Promise((r) => setTimeout(r, 0));
     expect(client.calls).toBe(1);
@@ -641,8 +615,44 @@ describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)',
     ]);
   });
 
+  it('a steer queued while parked applies on the way back in — the very next model request carries it', async () => {
+    // The pause block sits before the steer drain: a correction queued while hidden
+    // is folded into the first post-reveal request, not a turn late.
+    const pause = new PauseController();
+    const steering = new SteerController();
+    const seen: string[][] = []; // text blocks of every user message, per request
+    let call = 0;
+    const client: ModelClient = {
+      async createMessage(req) {
+        call++;
+        seen.push(req.messages.filter((m) => m.role === 'user').flatMap((m) => m.content.map((b) => (b.type === 'text' ? b.text : b.type))));
+        return call === 1
+          ? { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: {} }] }
+          : { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] };
+      },
+    };
+    const execute = vi.fn(async () => {
+      pause.set(true); // hidden from inside the tool call
+      return { content: 'ok' };
+    });
+
+    const runP = runAgent({ client, tools: TOOLS, execute, prompt: 'go', pause, steering });
+
+    await vi.waitFor(() => expect(execute).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0)); // parked at the boundary, hidden
+    // The user, looking at another activity, queues a correction for this run.
+    expect(steering.enqueue('use plan B instead', 'queue')).not.toBeNull();
+
+    pause.set(false); // the reveal
+    await runP;
+
+    // The very next request (the second) carries the steer as its newest user turn.
+    expect(seen).toHaveLength(2);
+    expect(seen[1].at(-1)).toBe(`␟[steer]\nuse plan B instead`);
+  });
+
   it('a run stopped while hidden ends cleanly — whenResumed resolves on the stop signal, no hang', async () => {
-    const pause = new FakePause();
+    const pause = new PauseController();
     const client = scriptedClient([
       { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_1', name: 'spaces__share', input: {} }] },
       { stopReason: 'end_turn', content: [{ type: 'text', text: 'never requested' }] },
@@ -667,7 +677,7 @@ describe('runAgent — pause while the region is hidden (R3-562 §7 R-ARD-20a)',
   });
 
   it('a run that starts hidden executes nothing until the reveal (R-ARD-15: no unattended writes)', async () => {
-    const pause = new FakePause();
+    const pause = new PauseController();
     pause.set(true); // hidden before the first turn
     const client = scriptedClient([{ stopReason: 'end_turn', content: [{ type: 'text', text: 'hi' }] }]);
 

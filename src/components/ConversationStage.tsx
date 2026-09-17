@@ -12,9 +12,6 @@ import {
   useWorkspace,
   postToRegion,
   onRegionMessage,
-  onRegionVisibilityChange,
-  isRegionHidden,
-  PauseController,
   describeChat,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
@@ -26,6 +23,7 @@ import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } fro
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent, type RunState } from "../lib/agentLoop";
+import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
 import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
@@ -76,14 +74,6 @@ export default function ConversationStage() {
   // without discarding the transcript. One controller per run, so a correction the
   // user took back never leaks into the next one.
   const steerRef = useRef<SteerController | null>(null);
-  // R3-562 (AGENT_RUN_DURABILITY_SPEC §7 R-ARD-20a): the pause controller for the
-  // in-flight run. The host keeps this region MOUNTED and merely hidden on an activity
-  // switch — the run is not torn down — but a loop executing where the user can neither
-  // see the transcript nor reach Stop breaks the loop observability contract
-  // (LLM_AND_AGENTS_SPEC §3.3), so it pauses at its next turn boundary and continues on
-  // reveal: nothing lost, no repair pass, no resume gate. Descriptive only — the
-  // visibility read grants nothing and gates nothing.
-  const pauseRef = useRef<PauseController | null>(null);
   const [queued, setQueued] = useState<readonly SteerMessage[]>([]);
   const [steerText, setSteerText] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -326,14 +316,6 @@ export default function ConversationStage() {
     });
   }, []);
 
-  // R3-562: route the host's visibility fact to the in-flight run. One subscription
-  // for the component's life; no run in flight ⇒ nothing to pause. The value at
-  // kickoff is read per-run (in run/resumeRun), not here — a run starting minutes
-  // later needs the visibility THEN, not at subscribe time.
-  useEffect(() => {
-    return onRegionVisibilityChange((hidden) => pauseRef.current?.set(hidden));
-  }, []);
-
   // Ask the panel what it has selected, once, on mount (R3-243).
   //
   // A `select-conversation` can be sent while this region does not exist: on mobile
@@ -430,12 +412,10 @@ export default function ConversationStage() {
     abortRef.current = controller;
     const steering = new SteerController();
     steerRef.current = steering;
-    // R3-562: pause while this region is hidden, seeded from the CURRENT visibility —
-    // a run that somehow starts hidden (R-ARD-15: no agent writes with no human
-    // present) executes nothing until the reveal.
-    const pause = new PauseController();
-    if (isRegionHidden()) pause.set(true);
-    pauseRef.current = pause;
+    // R3-562 (§7 R-ARD-20a): the hide→pause join for this run — seeded from the
+    // visibility at kickoff, driven by the host's push for the run's life
+    // (src/lib/runPause.ts, extracted so the join is testable without a DOM).
+    const { pause, dispose: disposePause } = createRunPause();
     setQueued([]);
     const offSteerChange = steering.onChange((pending) => setQueued([...pending]));
     // R3-560 (R-ARD-17): the prompt splits at a cache breakpoint — the PINNED
@@ -563,7 +543,7 @@ export default function ConversationStage() {
     } finally {
       offSteerChange();
       steerRef.current = null;
-      pauseRef.current = null;
+      disposePause();
       setQueued([]);
       setSteerText("");
       setStreaming("");
@@ -631,11 +611,9 @@ export default function ConversationStage() {
     abortRef.current = controller;
     const steeringC = new SteerController();
     steerRef.current = steeringC;
-    // R3-562: the same pause wiring as a fresh run — a resumed run is equally
+    // R3-562: the same hide→pause join as a fresh run — a resumed run is equally
     // invisible when the region is hidden.
-    const pause = new PauseController();
-    if (isRegionHidden()) pause.set(true);
-    pauseRef.current = pause;
+    const { pause, dispose: disposePause } = createRunPause();
     setQueued([]);
     const offSteerChange = steeringC.onChange((q) => setQueued([...q]));
     // R-ARD-17: the PINNED prefix replays byte-identically from the journal (the
@@ -716,7 +694,7 @@ export default function ConversationStage() {
     } finally {
       offSteerChange();
       steerRef.current = null;
-      pauseRef.current = null;
+      disposePause();
       setQueued([]);
       setSteerText("");
       setStreaming("");
