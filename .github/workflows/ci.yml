@@ -1,0 +1,101 @@
+# Continuous integration for the agent-demo app: lint, the repo's own test script, and
+# a production build on every pull request and on push to `main`.
+# Catches type/build breakage before the cache-zip workflow ships from main.
+#
+# R3-648 — until this landed, this repo's workflows were `cache.yml` alone: the Pages
+# cache-zip publisher, which runs on push to main and runs no checks. So nothing ran on a
+# pull request, and a PR here merged on the author's word that they had run the suite
+# locally. R3-641 is the evidence against trusting that: a symbol nothing imported reached
+# site-main's `main` while its PR reported success, because the leg that would have caught
+# it was not a CI step.
+#
+# Modelled on the merged `whiteboard` workflow deliberately — one shape across the app
+# repos, not a new one. R3-648 took that shape from `file-explorer`/`editor`.
+#
+# Exactly one COMMAND differs, and that is the part worth claiming because it is the part
+# that can be checked:
+#
+#   diff <(grep -vE '^\s*#|^$' whiteboard/.github/workflows/ci.yml) \
+#        <(grep -vE '^\s*#|^$' .github/workflows/ci.yml)
+#   → 24c24 — `npm run lint -- --max-warnings 0` here becomes `npm run lint`
+#
+# The COMMENTS differ in more places than that, and that diff cannot see them because it
+# strips them. So this header enumerates nothing: each comment below that departs from the
+# sibling says so where it sits.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an in-flight run — on a PR branch only. A push
+# run gets its own group (the SHA), so it can never be cancelled by a later merge.
+#
+# `cancel-in-progress: false` alone was not enough, and the first version of this comment
+# in the sibling repos overstated it: the group was still keyed on `github.ref`, and GitHub
+# keeps at most one pending run per group, so a third merge inside the window still
+# cancelled the middle commit's queued run. That moved the threshold from two merges to
+# three rather than removing it. Keying push runs by SHA is what removes it — and a
+# cancelled queued run is what would otherwise leave a superseded commit on `main` with a
+# cancelled verdict rather than a green one, which matters the moment a check is required
+# or someone bisects `main` by check status.
+#
+# `workflow_dispatch` — the third trigger this workflow declares, and the one that fix did
+# not reason about — takes the non-push arm, so a manual run shares the bare `ci-<ref>`
+# group and is not cancelled in flight. Harmless, and named because it is the one remaining
+# case where the one-pending-run-per-group rule still applies.
+concurrency:
+  group: ci-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned by commit SHA (see cache.yml rationale).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run lint` is the gate: `--max-warnings 0` lives in the script, so the string a
+      # contributor runs and the string CI runs are the same one.
+      #
+      # This is the one command in this file that differs from the workflow it is modelled
+      # on. R3-648 wrote the step as `npm run lint -- --max-warnings 0` in the three repos
+      # it landed in; R3-653's review found that form leaves `npm run lint` lax and turns
+      # the difference into something a contributor has to know. R3-656 is moving it —
+      # eleven open PRs as this lands, none merged yet — so this file uses the destination
+      # shape rather than landing the old one and needing a follow-up the same day.
+      #
+      # Why the flag matters here, measured in this repo on Node 22.22.2 rather than
+      # inherited from the sibling that carried the argument: three rules are warn-level
+      # (`react-hooks/exhaustive-deps`, `react-hooks/incompatible-library`,
+      # `react-hooks/unsupported-syntax`), and
+      # `npx eslint src/App.tsx --rule '{"max-lines":["warn",1]}'` exits 0 while the same
+      # command with `--max-warnings 0` exits 1. So an exhaustive-deps violation merged
+      # green until this workflow existed.
+      - name: Lint
+        run: npm run lint
+
+      # `npm test` is the same string the sibling workflows run; what differs is the script
+      # behind it here — `gen-sdk-skill.mjs --check && vitest run`. The first leg is the
+      # drift gate for the generated SDK skill map, and `&&` is what makes this step fail
+      # when the map is stale. Named because a workflow that called `vitest` directly would
+      # skip the gate and the map could rot unnoticed — R3-648 Do 2.
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

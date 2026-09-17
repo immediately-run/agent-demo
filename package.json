@@ -35,7 +35,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "test": "node scripts/gen-sdk-skill.mjs --check && vitest run",
     "preview": "vite preview",
     "gen:sdk-skill": "node scripts/gen-sdk-skill.mjs"
