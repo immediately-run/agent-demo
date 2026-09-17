@@ -1,7 +1,8 @@
 # Publishes a pre-cached zip of this repo to its own GitHub Pages on every push
 # to main, so immediately.run can load it fast — without hitting the GitHub API
 # (slow, and rate-limited for anonymous users). immediately.run looks for the
-# zip at https://<owner>.github.io/<repo>/cached_repositories/<branch>.zip and
+# zip at https://<owner>.github.io/<repo>/cached_repositories/<branch>.zip — and,
+# for a commit-pinned library mount, cached_repositories/<sha>.zip — and
 # falls back to the API if it's absent.
 #
 # The zip is built by `@immediately-run/cli cache-zip`, which embeds a
@@ -92,16 +93,62 @@ jobs:
       # cache-zip build never sees it.
       # `secrets` cannot be referenced in a step `if:` (GitHub rejects the
       # workflow at parse time — "Unrecognized named-value: 'secrets'"). Surface
-      # the App id through `env` first, then gate on `env`, which IS allowed.
+      # the App credentials through `env` first, then gate on `env`, which IS
+      # allowed — and read them back out of `env` in `with:` too. Spelling a
+      # secret name twice is how the gate and the action drift apart: rename one
+      # and the gate evaluates false forever while the action still gets a value.
+      #
+      # GATE ON BOTH SECRETS, not just the id. They are a PAIR, and the mint
+      # needs both. With only the id checked, a repo that has `DEPLOY_APP_ID`
+      # set and `DEPLOY_APP_PRIVATE_KEY` unset passes this gate and hands
+      # create-github-app-token an empty private key. One credential of a pair
+      # present is exactly the half-configured case a guard exists for.
+      #
+      # `continue-on-error` covers what the gate CANNOT see: a malformed key, a
+      # rotated keypair, or the App not installed on this repo. All three pass
+      # the conjunction and still fail the mint — and a failed mint without
+      # `continue-on-error` kills the whole `build` job before `cache-zip` runs,
+      # so the repo publishes NO zip at all instead of falling back to
+      # GITHUB_TOKEN as the comment above and the `configure-pages` comment
+      # below both promise. With it, the step's empty `token` output falls
+      # through to `github.token` on its own.
+      #
+      # What that rescues, precisely: a repo that ALREADY has Pages enabled. On
+      # a repo that does not, `configure-pages` with `enablement: true` and only
+      # GITHUB_TOKEN fails "Resource not accessible by integration" (the header
+      # comment above) and `build` dies one step later instead. Enabling Pages
+      # on a fresh repo genuinely needs the App; this only stops a broken App
+      # from costing the zip as well.
       - name: Mint Pages-enablement token
         id: pages-token
         env:
           DEPLOY_APP_ID: ${{ secrets.DEPLOY_APP_ID }}
-        if: ${{ env.DEPLOY_APP_ID != '' }}
+          DEPLOY_APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+        if: ${{ env.DEPLOY_APP_ID != '' && env.DEPLOY_APP_PRIVATE_KEY != '' }}
+        continue-on-error: true
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
         with:
-          app-id: ${{ secrets.DEPLOY_APP_ID }}
-          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          app-id: ${{ env.DEPLOY_APP_ID }}
+          private-key: ${{ env.DEPLOY_APP_PRIVATE_KEY }}
+
+      # A half-wired App is BROKEN, not unconfigured — say so out loud. The gate
+      # above and `continue-on-error` together turn every broken case into a
+      # silent skip, and the only symptom left is a repo that quietly never gets
+      # Pages enabled. Warn when exactly one credential is set, or when both are
+      # set and the mint produced no token anyway. A warning, not a failure: a
+      # repo with neither secret is legitimate (a fork, anything outside the org)
+      # and must stay quiet.
+      - name: Warn on a half-wired deploy App
+        env:
+          DEPLOY_APP_ID: ${{ secrets.DEPLOY_APP_ID }}
+          DEPLOY_APP_PRIVATE_KEY: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+        if: >-
+          ${{ (env.DEPLOY_APP_ID != '' && env.DEPLOY_APP_PRIVATE_KEY == '')
+          || (env.DEPLOY_APP_ID == '' && env.DEPLOY_APP_PRIVATE_KEY != '')
+          || (env.DEPLOY_APP_ID != '' && env.DEPLOY_APP_PRIVATE_KEY != ''
+          && steps.pages-token.outputs.token == '') }}
+        run: |
+          echo "::warning title=Deploy App half-wired::DEPLOY_APP_ID and DEPLOY_APP_PRIVATE_KEY must BOTH be set, and the App must be installed on this repo with a current keypair. Pages auto-enablement is being skipped. If Pages is not already enabled here, configure-pages will fail on the next step."
 
       # Auto-provision GitHub Pages so the deploy job can publish even on a
       # freshly-created repo. Without this, `deploy-pages` 404s every run until
@@ -140,15 +187,30 @@ jobs:
             echo "no package-lock.json — skipping install; cache-zip will use the package CDN"
           fi
 
+      # Two keys for the same build: the branch name (what apps booted by branch
+      # probe) and the pushing commit's sha (what a commit-pinned library mount
+      # probes — site-main COW.ts mountGitHubRepository -> cachedZipUrl uses the
+      # pin verbatim, and libraryFreshness.ts serves a commit pin cache/REST-first;
+      # LIBRARY_MOUNTS_SPEC §7 recommends commit pins). A branch-keyed zip alone
+      # leaves every sha-pinned mount on the anonymous-REST fallback (found on
+      # R3-624: file-selector's pinned sha 404s while its main.zip is 200).
+      #
+      # BOUND, by design: each deploy REPLACES the Pages site, so a sha zip serves
+      # only while its commit is the branch head — a consumer's pinned sha is evicted
+      # by the library's next push and its mount falls back to REST (correct, slower)
+      # until the consumer re-pins. A pin bump is a refresh; keeping stale shas
+      # resident across deploys is a possible follow-up, deliberately not built here.
       - name: Build cache zip
         run: |
-          npx -y @immediately-run/cli@0.8.2 cache-zip \
-            --owner "${{ github.repository_owner }}" \
-            --repo "${{ github.event.repository.name }}" \
-            --ref "${{ github.ref_name }}" \
-            --default-branch "${{ github.event.repository.default_branch }}" \
-            --bundle-packages \
-            --out "_site/cached_repositories/${{ github.ref_name }}.zip"
+          for ref in "${{ github.ref_name }}" "${{ github.sha }}"; do
+            npx -y @immediately-run/cli@0.8.2 cache-zip \
+              --owner "${{ github.repository_owner }}" \
+              --repo "${{ github.event.repository.name }}" \
+              --ref "$ref" \
+              --default-branch "${{ github.event.repository.default_branch }}" \
+              --bundle-packages \
+              --out "_site/cached_repositories/$ref.zip"
+          done
 
       # A friendly landing page so the Pages root isn't a bare 404. Optional —
       # delete it if you serve your own content from Pages. (To also host a live
