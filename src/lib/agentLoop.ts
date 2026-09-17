@@ -32,6 +32,7 @@ import {
   type SteerMessage,
   type SteerSource,
 } from './steering';
+import type { PauseSource } from '@immediately-run/sdk';
 
 export type TextBlock = { type: 'text'; text: string };
 /**
@@ -244,6 +245,11 @@ export interface AgentEvents {
    *  true when an `interrupt`-mode steer cut an in-flight model turn short (as
    *  opposed to being applied at an ordinary turn boundary). */
   onSteer?(info: { messages: SteerMessage[]; interrupted: boolean }): void;
+  /** R3-562: the loop reached a turn boundary while its region was hidden and stopped
+   *  advancing. A surface can say "paused — this view is hidden" instead of looking hung. */
+  onPause?(info: { turn: number }): void;
+  /** R3-562: the region was revealed (or the run was stopped) and the loop resumed. */
+  onResume?(info: { turn: number }): void;
   /** R3-559: one checkpoint boundary per `messages` mutation, plus the execution
    *  boundaries B2 (intent, before the executor) and B3 (per completed call), and
    *  B4 run-state stamps. The loop awaits the returned promise before proceeding:
@@ -304,6 +310,12 @@ export interface RunAgentOptions {
    *  keep every `tool_use` paired with a `tool_result`. Absent ⇒ the loop behaves
    *  exactly as before. */
   steering?: SteerSource;
+  /** R3-562 (AGENT_RUN_DURABILITY_SPEC §7 R-ARD-20a): pause the run while nobody can
+   *  see it. The host keeps a hidden region mounted (no reboot, no teardown), so the
+   *  run pauses at its next turn boundary — never mid-turn, never mid-batch, so every
+   *  `tool_use` keeps its `tool_result` — and continues on reveal with no repair pass
+   *  and no resume gate. Omitted ⇒ the loop never pauses, exactly as before. */
+  pause?: PauseSource;
   /** R3-559 (R-ARD-7c): the clock every boundary `t` stamp is read from. Injected
    *  so a resumed run's replay reads journal time, not replay-time wall clock —
    *  a resumed run must not DECIDE differently because it resumed on Tuesday. */
@@ -534,7 +546,7 @@ const TRUNCATED_RETRY_TEXT =
  * accounts tokens and compacts automatically so it can run long.
  */
 export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
-  const { client, tools, execute, system, prompt, events, signal, steering } = opts;
+  const { client, tools, execute, system, prompt, events, signal, steering, pause } = opts;
   const maxTurns = opts.maxTurns ?? 100;
   const maxNudges = opts.maxNudges ?? 1;
   const maxTruncationRetries = opts.maxTruncationRetries ?? 2;
@@ -634,6 +646,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<ChatMessage[]> {
     // per-request `signal` below (which aborts the in-flight upstream turn), this
     // halts "the loop between tool calls AND aborts the in-flight LLM request".
     if (signal?.aborted) break;
+
+    // R3-562 (§7 R-ARD-20a): if the region is hidden, stop here — at the boundary, with
+    // the previous turn's tool batch fully paired — and wait for the reveal. Placed after
+    // the stop check and before the steer drain so a correction queued while hidden is
+    // applied on the way back in, as the very next turn, rather than a turn late. Pause
+    // mutates nothing in `messages`, so it emits no boundary and leaves no mark in the
+    // journal: the user never asked for it, and the transcript stays byte-true.
+    if (pause?.isPaused()) {
+      events?.onPause?.({ turn });
+      await pause.whenResumed(signal);
+      events?.onResume?.({ turn });
+      // `whenResumed` also resolves on abort, so a run stopped while hidden lands here
+      // rather than awaiting a reveal that never comes.
+      if (signal?.aborted) break;
+    }
 
     // R3-333: apply any queued corrections at the TURN BOUNDARY, before the next
     // request, so the model's very next turn reflects them. Draining here (rather
