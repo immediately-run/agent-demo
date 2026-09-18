@@ -270,16 +270,28 @@ export default function ConversationList() {
         <details className="cl-others">
           <summary>Other repositories</summary>
           <ul className="cl-others-list">
-            {others.map((g) => (
-              <li
-                key={g.repo}
-                className="cl-others-row"
-                title={`Open ${g.repo} on immediately.run to see these conversations.`}
-              >
-                <span className="cl-others-repo">{g.repo}</span>
-                <span className="cl-others-count">{g.count}</span>
-              </li>
-            ))}
+            {others.map((g) => {
+              // R3-475 — the count must say what it counts: a bare digit has no
+              // hover label and announces as a lone number to a screen reader.
+              // The row's own title says what OPENING the repo does; this one
+              // says what the number IS. (The accessible text is visually-hidden
+              // real text, not aria-label on a generic span — naming is prohibited
+              // on role=generic, so an aria-label there would be a placebo.)
+              const countLabel = `${g.count} ${g.count === 1 ? "conversation" : "conversations"} in ${g.repo}`;
+              return (
+                <li
+                  key={g.repo}
+                  className="cl-others-row"
+                  title={`Open ${g.repo} on immediately.run to see these conversations.`}
+                >
+                  <span className="cl-others-repo">{g.repo}</span>
+                  <span className="cl-others-count" title={countLabel}>
+                    <span className="cl-vh">{countLabel}</span>
+                    <span aria-hidden="true">{g.count}</span>
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

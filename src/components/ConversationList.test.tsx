@@ -158,3 +158,53 @@ describe("ConversationList — the row is two controls, two names (R3-612 / WCAG
     await waitFor(() => expect(screen.queryByText("notes")).toBeNull());
   });
 });
+
+describe("ConversationList — the other-repositories count names what it counts (R3-475)", () => {
+  // Two stamped repos ride the REAL store (one with two members, one with one), so
+  // the group counts are the producer's own arithmetic; the workspace mock stays
+  // null, so every stamped repo groups under "other repositories" by rule.
+  const seedWithOthers = async () => {
+    storeHolder.make = async () => {
+      const { createConversationStore } = await import("../lib/conversationStore");
+      const { MemFs } = await import("../lib/testing/memStoreFs");
+      const base = createConversationStore({
+        recordRoot: "/settings",
+        fs: new MemFs(),
+        tabId: "tab-conversation-list-others",
+      });
+      await base.create("notes");
+      await base.create("recipe plan", "other/repo");
+      await base.create("recipe followup", "other/repo");
+      await base.create("solo elsewhere", "third/repo");
+      const wrapped = {
+        ...base,
+        list: vi.fn(base.list.bind(base)),
+        load: vi.fn(base.load.bind(base)),
+        save: vi.fn(base.save.bind(base)),
+        remove: vi.fn(base.remove.bind(base)),
+      };
+      lastStore = wrapped;
+      return wrapped;
+    };
+  };
+
+  it("the count carries a hover label and an accessible text — singular and plural", async () => {
+    await seedWithOthers();
+    render(<ConversationList />);
+    await waitFor(() => expect(screen.getByText("Other repositories")).toBeTruthy());
+
+    // The accessible form is REAL (visually hidden) text; the visible digit is
+    // aria-hidden so the number is never announced as a bare "2".
+    const pluralLabel = screen.getByText("2 conversations in other/repo");
+    expect(pluralLabel.classList.contains("cl-vh")).toBe(true);
+    const pluralDigit = screen.getByText("2");
+    expect(pluralDigit.getAttribute("aria-hidden")).toBe("true");
+    expect(pluralDigit.parentElement!.getAttribute("title")).toBe("2 conversations in other/repo");
+
+    const singularLabel = screen.getByText("1 conversation in third/repo");
+    expect(singularLabel.classList.contains("cl-vh")).toBe(true);
+    const singularDigit = screen.getByText("1");
+    expect(singularDigit.getAttribute("aria-hidden")).toBe("true");
+    expect(singularDigit.parentElement!.getAttribute("title")).toBe("1 conversation in third/repo");
+  });
+});
