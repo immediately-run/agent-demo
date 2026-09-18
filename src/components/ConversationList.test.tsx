@@ -54,7 +54,11 @@ type SpiedStore = import("../lib/conversationStore").ConversationStore & {
 };
 let lastStore: SpiedStore | null = null;
 
-const makeStore = async (): Promise<SpiedStore> => {
+/** The one seeded-store builder: a REAL fs-injected store over MemFs, seeded
+ *  through the store itself, then spy-wrapped. Both describes ride it. */
+const makeSeededStore = async (
+  seed: (store: import("../lib/conversationStore").ConversationStore) => Promise<void>,
+): Promise<SpiedStore> => {
   const { createConversationStore } = await import("../lib/conversationStore");
   const { MemFs } = await import("../lib/testing/memStoreFs");
   const base = createConversationStore({
@@ -62,7 +66,7 @@ const makeStore = async (): Promise<SpiedStore> => {
     fs: new MemFs(),
     tabId: "tab-conversation-list",
   });
-  await base.create("notes");
+  await seed(base);
   const wrapped = {
     ...base,
     list: vi.fn(base.list.bind(base)),
@@ -73,7 +77,10 @@ const makeStore = async (): Promise<SpiedStore> => {
   lastStore = wrapped;
   return wrapped;
 };
-storeHolder.make = makeStore;
+
+const makeStore = () => makeSeededStore(async (s) => {
+  await s.create("notes");
+});
 
 import ConversationList from "./ConversationList";
 import { STAGE_REGION } from "../lib/conversationIpc";
@@ -83,6 +90,9 @@ const regionListeners: Array<(m: { from: string; data: unknown }) => void> = [];
 beforeEach(() => {
   regionListeners.length = 0;
   lastStore = null;
+  // Restore the default factory — a describe that re-seeds `storeHolder.make`
+  // must never leak its fixture into describes that run after it.
+  storeHolder.make = makeStore;
 });
 
 afterEach(() => {
@@ -162,34 +172,20 @@ describe("ConversationList — the row is two controls, two names (R3-612 / WCAG
 describe("ConversationList — the other-repositories count names what it counts (R3-475)", () => {
   // Two stamped repos ride the REAL store (one with two members, one with one), so
   // the group counts are the producer's own arithmetic; the workspace mock stays
-  // null, so every stamped repo groups under "other repositories" by rule.
-  const seedWithOthers = async () => {
-    storeHolder.make = async () => {
-      const { createConversationStore } = await import("../lib/conversationStore");
-      const { MemFs } = await import("../lib/testing/memStoreFs");
-      const base = createConversationStore({
-        recordRoot: "/settings",
-        fs: new MemFs(),
-        tabId: "tab-conversation-list-others",
+  // null, so every stamped repo groups under "other repositories" by rule. The
+  // factory swap is restored by the shared beforeEach, which resets it to makeStore.
+  const seedWithOthers = () => {
+    storeHolder.make = () =>
+      makeSeededStore(async (s) => {
+        await s.create("notes");
+        await s.create("recipe plan", "other/repo");
+        await s.create("recipe followup", "other/repo");
+        await s.create("solo elsewhere", "third/repo");
       });
-      await base.create("notes");
-      await base.create("recipe plan", "other/repo");
-      await base.create("recipe followup", "other/repo");
-      await base.create("solo elsewhere", "third/repo");
-      const wrapped = {
-        ...base,
-        list: vi.fn(base.list.bind(base)),
-        load: vi.fn(base.load.bind(base)),
-        save: vi.fn(base.save.bind(base)),
-        remove: vi.fn(base.remove.bind(base)),
-      };
-      lastStore = wrapped;
-      return wrapped;
-    };
   };
 
   it("the count carries a hover label and an accessible text — singular and plural", async () => {
-    await seedWithOthers();
+    seedWithOthers();
     render(<ConversationList />);
     await waitFor(() => expect(screen.getByText("Other repositories")).toBeTruthy());
 

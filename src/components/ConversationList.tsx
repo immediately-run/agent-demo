@@ -4,17 +4,19 @@
 // the stage over IPC. It runs no agent and holds no net:fetch — all model calls
 // happen in the stage (ConversationStage).
 //
-// R3-475 — the list is SCOPED to the repository loaded in the workbench: the host
-// confers the editor session's working tree on this panel too (`exposesWorkingTree:
-// 'ro'`, exactly like `panel.files`), whose mount label is the edited repo's
-// `owner/repo`. Conversations stamped with another repo never mix into the list;
-// they surface under "Other repositories" (repo + count). Legacy unstamped
-// conversations ride along with every scope and get stamped on their next save.
+// R3-475 — the list is SCOPED to the repository loaded in the workbench: the
+// scoping key is `useWorkspace()?.label` (the workspace the host projects to the
+// panel), NOT a conferred worktree mount — the `exposesWorkingTree` shortcut was
+// rejected (the panel holds no such capability and site-main pins it absent; see
+// the item's narrowed history). Conversations stamped with another repo never mix
+// into the list; they surface under "Other repositories" (repo + count). Legacy
+// unstamped conversations ride along with every scope and get stamped on their
+// next save.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@immediately-run/sdk";
 import { openConversationStore, metaOf, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
-import { scopeConversations } from "../lib/conversationScope";
+import { scopeConversations, type RepoGroup } from "../lib/conversationScope";
 import { applyConversationUpdate } from "../lib/conversationUpdate";
 import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
@@ -28,6 +30,13 @@ function relTime(ms: number): string {
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
+}
+
+/** R3-475 — what an other-repositories count IS, in words ("2 conversations in
+ *  other/repo"): the hover title and the visually-hidden accessible text are the
+ *  one string, so they can never disagree. */
+function countLabel(g: RepoGroup): string {
+  return `${g.count} ${g.count === 1 ? "conversation" : "conversations"} in ${g.repo}`;
 }
 
 export default function ConversationList() {
@@ -273,11 +282,12 @@ export default function ConversationList() {
             {others.map((g) => {
               // R3-475 — the count must say what it counts: a bare digit has no
               // hover label and announces as a lone number to a screen reader.
-              // The row's own title says what OPENING the repo does; this one
-              // says what the number IS. (The accessible text is visually-hidden
-              // real text, not aria-label on a generic span — naming is prohibited
-              // on role=generic, so an aria-label there would be a placebo.)
-              const countLabel = `${g.count} ${g.count === 1 ? "conversation" : "conversations"} in ${g.repo}`;
+              // The row's own title says what OPENING the repo does; the count's
+              // label says what the number IS. (The accessible text is
+              // visually-hidden real text, not aria-label on a generic span —
+              // naming is prohibited on role=generic, so aria-label would be a
+              // placebo.)
+              const label = countLabel(g);
               return (
                 <li
                   key={g.repo}
@@ -285,8 +295,8 @@ export default function ConversationList() {
                   title={`Open ${g.repo} on immediately.run to see these conversations.`}
                 >
                   <span className="cl-others-repo">{g.repo}</span>
-                  <span className="cl-others-count" title={countLabel}>
-                    <span className="cl-vh">{countLabel}</span>
+                  <span className="cl-others-count" title={label}>
+                    <span className="cl-vh">{label}</span>
                     <span aria-hidden="true">{g.count}</span>
                   </span>
                 </li>
