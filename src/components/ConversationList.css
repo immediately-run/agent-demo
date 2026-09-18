@@ -55,29 +55,41 @@
   padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 8px;
+}
+/* R3-612 — the row's cursor/hover affordance lives on the OPEN control (the
+   real button), not on the row: the row is a plain <li> again, so hovering the
+   delete button no longer looks like activating the open control. */
+.cl-row-open {
+  /* Button reset, then the old .cl-row-main layout: full-width, text left. */
+  appearance: none;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
   cursor: pointer;
-}
-.cl-row:hover {
-  background: var(--panel, #161616);
-}
-/* Keyboard focus must be SEEN (WCAG 2.4.7): a background shift alone is too
-   faint, so the row also gets the design system's violet accent ring (index.css
-   --accent-2 / --glow hue) via box-shadow, which follows the row's radius. */
-.cl-row:focus-visible {
-  background: var(--panel, #161616);
-  outline: none;
-  box-shadow: 0 0 0 2px var(--accent-2, #b285f2);
-}
-.cl-row-active {
-  border-color: var(--border, #2a2a2a);
-  background: var(--panel, #161616);
-}
-.cl-row-main {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
   flex: 1;
+}
+.cl-row-open:hover {
+  background: var(--panel, #161616);
+}
+/* Keyboard focus must be SEEN (WCAG 2.4.7): a background shift alone is too
+   faint, so the open control gets the design system's violet accent ring
+   (index.css --accent-2 / --glow hue) via box-shadow, which follows its radius. */
+.cl-row-open:focus-visible {
+  background: var(--panel, #161616);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-2, #b285f2);
+  border-radius: 6px;
+}
+.cl-row-active {
+  border-color: var(--border, #2a2a2a);
+  background: var(--panel, #161616);
 }
 .cl-row-title {
   font-size: 13px;

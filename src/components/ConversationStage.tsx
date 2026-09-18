@@ -23,6 +23,7 @@ import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } fro
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
 import { runAgent, type RunState } from "../lib/agentLoop";
+import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
 import { useLeaseRefresh } from "../hooks/useLeaseRefresh";
@@ -480,6 +481,10 @@ export default function ConversationStage() {
     abortRef.current = controller;
     const steering = new SteerController();
     steerRef.current = steering;
+    // R3-562 (§7 R-ARD-20a): the hide→pause join for this run — seeded from the
+    // visibility at kickoff, driven by the host's push for the run's life
+    // (src/lib/runPause.ts, extracted so the join is testable without a DOM).
+    const { pause, dispose: disposePause } = createRunPause();
     setQueued([]);
     const offSteerChange = steering.onChange((pending) => setQueued([...pending]));
     // R3-560 (R-ARD-17): the prompt splits at a cache breakpoint — the PINNED
@@ -502,6 +507,8 @@ export default function ConversationStage() {
         signal: controller.signal,
         // R3-333: the steering queue — the other verb the human has.
         steering,
+        // R3-562 (§7 R-ARD-20a): pause at turn boundaries while this region is hidden.
+        pause,
         // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
@@ -616,6 +623,7 @@ export default function ConversationStage() {
     } finally {
       offSteerChange();
       steerRef.current = null;
+      disposePause();
       setQueued([]);
       setSteerText("");
       setStreaming("");
@@ -697,6 +705,9 @@ export default function ConversationStage() {
     abortRef.current = controller;
     const steeringC = new SteerController();
     steerRef.current = steeringC;
+    // R3-562: the same hide→pause join as a fresh run — a resumed run is equally
+    // invisible when the region is hidden.
+    const { pause, dispose: disposePause } = createRunPause();
     setQueued([]);
     const offSteerChange = steeringC.onChange((q) => setQueued([...q]));
     // R-ARD-17: the PINNED prefix replays byte-identically from the journal (the
@@ -717,6 +728,7 @@ export default function ConversationStage() {
         },
         signal: controller.signal,
         steering: steeringC,
+        pause,
         contextWindow: describeChat()?.features.maxContextTokens,
         events: {
           onBoundary: async (b) => {
@@ -788,6 +800,7 @@ export default function ConversationStage() {
     } finally {
       offSteerChange();
       steerRef.current = null;
+      disposePause();
       setQueued([]);
       setSteerText("");
       setStreaming("");

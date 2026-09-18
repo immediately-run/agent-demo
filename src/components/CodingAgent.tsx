@@ -300,11 +300,35 @@ export default function CodingAgent() {
     }
   };
 
+  // R3-612 / R-IX-5 — every run lands in a durable conversation, so this surface
+  // must offer a fresh start and name where the runs go. The Conversations list
+  // is where they accumulate and where one can be removed; this surface names
+  // that place rather than growing its own browser.
+  const newConversation = async () => {
+    const store = storeRef.current;
+    if (!store || running) return;
+    try {
+      const conv = await store.create();
+      convRef.current = conv;
+      setLog([]);
+      setStreaming("");
+      setThinking("");
+    } catch (e) {
+      setLog((l) => [
+        ...l,
+        { kind: "error", text: `Could not start a new conversation (${(e as Error)?.message ?? String(e)})` },
+      ]);
+    }
+  };
+
   return (
     <div className="ca">
       <header className="ca-hd">
         <span className="ca-title">Coding agent</span>
         <span className="ca-sub">{toolset.tools.length} tools (catalog + files + project + diagnostics)</span>
+        <button type="button" className="ca-new" disabled={running} onClick={() => void newConversation()}>
+          New conversation
+        </button>
       </header>
 
       <div className="ca-prompt-row">
@@ -331,6 +355,12 @@ export default function CodingAgent() {
       {/* aria-live matches the conversation stage's transcript (ConversationStage),
            so screen readers hear turns land here too. */}
       <ul className="ca-log" aria-live="polite">
+        {/* R3-612 / R-IX-5 — the empty state names where runs are kept: this
+            surface persists silently otherwise, and the list (which removes)
+            is the only place that shows the accumulation. */}
+        {!log.length && !thinking && !streaming && (
+          <li className="ca-line ca-empty">Runs are saved to your Conversations list.</li>
+        )}
         {/* Folded tool calls + markdown replies (R3-473/R3-474) — shared with the
             conversation stage so both transcripts read identically. */}
         <TranscriptRows log={log} />

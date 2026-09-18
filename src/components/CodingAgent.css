@@ -20,6 +20,7 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  gap: 8px;
 }
 .ca-title {
   font-weight: 600;
@@ -27,6 +28,24 @@
 .ca-sub {
   font-size: 12px;
   opacity: 0.6;
+  flex: 1;
+}
+.ca-new {
+  appearance: none;
+  border: 1px solid var(--ca-border, #2c2f34);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.ca-new:hover { background: var(--ca-hover, #23262b); }
+.ca-new:disabled { opacity: .5; cursor: default; }
+.ca-empty {
+  opacity: 0.6;
+  font-size: 12px;
 }
 .ca-prompt {
   width: 100%;

@@ -84,6 +84,20 @@ const HEAD_TAIL = Math.floor(ENTRY_STRING_LIMIT / 2);
 
 const genId = (): string => crypto.randomUUID();
 
+/**
+ * The list-row projection of a full record — ONE home (R3-612 / R6): `list()`
+ * builds rows with it and any consumer patching one row from a loaded record
+ * (the `conversation-updated` handler) projects with the same function, so the
+ * copies cannot drift on which fields a meta carries.
+ */
+export const metaOf = (conv: Conversation): ConversationMeta => ({
+  id: conv.id,
+  title: conv.title,
+  createdAt: conv.createdAt,
+  updatedAt: conv.updatedAt,
+  repo: conv.repo,
+});
+
 /** The `fs.promises` subset the store uses — narrowed so tests inject a fake. */
 export interface StoreFs {
   readFile(path: string, encoding: 'utf8'): Promise<string>;
@@ -838,8 +852,7 @@ export function createConversationStore(opts: {
       const metas: ConversationMeta[] = [];
       for (const id of ids) {
         const conv = await load(id);
-        if (conv)
-          metas.push({ id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, repo: conv.repo });
+        if (conv) metas.push(metaOf(conv));
       }
       return metas.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, LIST_CAP);
     },
