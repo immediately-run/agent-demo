@@ -5,23 +5,14 @@ import { describe, it, expect, vi } from "vitest";
 // the same pattern conversationStore.test.ts uses.
 vi.mock("@immediately-run/sdk", () => ({ openSettings: vi.fn() }));
 
-import { createConversationStore } from "./conversationStore";
+import { createConversationStore, metaOf } from "./conversationStore";
 import { MemFs } from "./testing/memStoreFs";
 import { applyConversationUpdate } from "./conversationUpdate";
-import type { ConversationMeta } from "./conversationModel";
 
 // Inputs come from the REAL fs-injected store (R2: one input per producer from
 // calling that producer) — a conversation is created and saved through the store
 // and its returned records drive the assertions, never a hand-typed literal.
 const store = (fs: MemFs) => createConversationStore({ recordRoot: "/settings", fs });
-
-const metaOf = (c: { id: string; title: string; createdAt: number; updatedAt: number; repo?: string }): ConversationMeta => ({
-  id: c.id,
-  title: c.title,
-  createdAt: c.createdAt,
-  updatedAt: c.updatedAt,
-  ...(c.repo !== undefined ? { repo: c.repo } : {}),
-});
 
 describe("applyConversationUpdate — one message patches one row (R3-612 / R-IX-4)", () => {
   it("replaces the matching row, bumps it by updatedAt, and re-orders newest-first", async () => {
@@ -54,10 +45,23 @@ describe("applyConversationUpdate — one message patches one row (R3-612 / R-IX
     expect(next.map((c) => c.id)).toEqual([made.id]);
   });
 
-  it("keeps an unchanged row's referential identity (same object in, same out)", () => {
-    const a: ConversationMeta = { id: "a", title: "a", createdAt: 1, updatedAt: 1 };
-    const b: ConversationMeta = { id: "b", title: "b", createdAt: 2, updatedAt: 2 };
-    const next = applyConversationUpdate([a, b], { ...b, title: "b renamed" });
-    expect(next.find((c) => c.id === "a")).toBe(a);
+  it("keeps an unchanged row's referential identity (same object in, same out)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const s = store(new MemFs());
+    const first = await s.create("first");
+    vi.setSystemTime(2000);
+    const second = await s.create("second");
+    const list = await s.list();
+
+    // The stage saved only the SECOND conversation; the first row must survive
+    // as the SAME object so render memoisation does not re-render it.
+    vi.setSystemTime(3000);
+    const saved = await s.save({ ...second, title: "second, renamed" });
+
+    const next = applyConversationUpdate(list, metaOf(saved));
+    expect(next.map((c) => c.id)).toEqual([second.id, first.id]);
+    expect(next.find((c) => c.id === first.id)).toBe(list[1]);
+    vi.useRealTimers();
   });
 });

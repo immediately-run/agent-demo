@@ -20,6 +20,10 @@ import "./AgentDemo.css";
 // show the gate refusing an off-catalog call — the agent can't escape its grant.
 const OFF_CATALOG = "spaces:share";
 
+// R3-612 — the delegated file, named once: the create (capFile relPath) and the
+// remove (openFs().rm) must never drift apart on a rename.
+const DEMO_FILE = "demo.txt";
+
 // §5.6 L2 inter-app messaging (T19). This app's binding declares an ipc edge to
 // panel.files ONLY (`ipc.to: ["panel.files"]`). Posting there is delivered (the
 // file explorer declared it `accepts` us); posting anywhere else is refused at the
@@ -150,7 +154,7 @@ export default function AgentDemo() {
       // { saved } result.
       const settings = await openSettings();
       const res = await invokeTask<{ saved: boolean }>("edit-file", {
-        file: capFile({ mountId: settings.id ?? settings.path, relPath: "demo.txt" }, { mode: "rw" }),
+        file: capFile({ mountId: settings.id ?? settings.path, relPath: DEMO_FILE }, { mode: "rw" }),
       });
       setEditNote(res?.saved ? "saved demo.txt to your settings ✓" : "done");
     } catch (e) {
@@ -180,8 +184,8 @@ export default function AgentDemo() {
     setEditNote(null);
     try {
       const settings = await openSettings();
-      await openFs(settings).rm("demo.txt");
-      setEditNote("removed demo.txt from your settings");
+      await openFs(settings).rm(DEMO_FILE);
+      setEditNote(`removed ${DEMO_FILE} from your settings`);
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       setEditNote(
@@ -189,7 +193,9 @@ export default function AgentDemo() {
           ? "cancelled"
           : code === "auth-required"
             ? "sign in to use a space"
-            : code,
+            : code === "forbidden"
+              ? "forbidden — this app cannot remove from the settings mount"
+              : code,
       );
     } finally {
       setRemoving(false);
@@ -363,7 +369,7 @@ export default function AgentDemo() {
         </div>
         {editNote && (
           <p className="ad-escape-sub">
-            edit-file → <span className="ad-err">{editNote}</span>
+            {DEMO_FILE} → <span className="ad-err">{editNote}</span>
           </p>
         )}
       </div>

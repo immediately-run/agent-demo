@@ -12,7 +12,7 @@
 // conversations ride along with every scope and get stamped on their next save.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@immediately-run/sdk";
-import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
+import { openConversationStore, metaOf, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations } from "../lib/conversationScope";
 import { applyConversationUpdate } from "../lib/conversationUpdate";
@@ -145,19 +145,9 @@ export default function ConversationList() {
     try {
       const conv = await store.load(id);
       // `null` = deleted elsewhere (or corrupt): the row goes.
-      setItems((l) =>
-        conv
-          ? applyConversationUpdate(l, {
-              id: conv.id,
-              title: conv.title,
-              createdAt: conv.createdAt,
-              updatedAt: conv.updatedAt,
-              ...(conv.repo !== undefined ? { repo: conv.repo } : {}),
-            })
-          : l.filter((c) => c.id !== id),
-      );
+      setItems((l) => (conv ? applyConversationUpdate(l, metaOf(conv)) : l.filter((c) => c.id !== id)));
     } catch {
-      /* transient read failure — keep the last good list */
+      // Read failure — keep the last good list, the same resolution as refresh().
     }
   }, []);
 
@@ -191,10 +181,7 @@ export default function ConversationList() {
     try {
       // Stamped with the loaded repo (R3-475) so it scopes correctly from birth.
       const conv = await store.create(undefined, currentRepo);
-      setItems((l) => [
-        { id: conv.id, title: conv.title, createdAt: conv.createdAt, updatedAt: conv.updatedAt, repo: conv.repo },
-        ...l,
-      ]);
+      setItems((l) => [metaOf(conv), ...l]);
       setStoreError(null);
       openConversation(conv.id);
     } catch (e) {
