@@ -10,6 +10,7 @@ import {
   postToRegion,
   invokeTask,
   capFile,
+  openFs,
   openSettings,
   type ApiMethod,
 } from "@immediately-run/sdk";
@@ -18,6 +19,10 @@ import "./AgentDemo.css";
 // A method we deliberately do NOT hold (this app's grant lacks spaces:admin), to
 // show the gate refusing an off-catalog call — the agent can't escape its grant.
 const OFF_CATALOG = "spaces:share";
+
+// R3-612 — the delegated file, named once: the create (capFile relPath) and the
+// remove (openFs().rm) must never drift apart on a rename.
+const DEMO_FILE = "demo.txt";
 
 // §5.6 L2 inter-app messaging (T19). This app's binding declares an ipc edge to
 // panel.files ONLY (`ipc.to: ["panel.files"]`). Posting there is delivered (the
@@ -149,9 +154,9 @@ export default function AgentDemo() {
       // { saved } result.
       const settings = await openSettings();
       const res = await invokeTask<{ saved: boolean }>("edit-file", {
-        file: capFile({ mountId: settings.id ?? settings.path, relPath: "demo.txt" }, { mode: "rw" }),
+        file: capFile({ mountId: settings.id ?? settings.path, relPath: DEMO_FILE }, { mode: "rw" }),
       });
-      setEditNote(res?.saved ? "saved demo.txt to your settings ✓" : "done");
+      setEditNote(res?.saved ? `saved ${DEMO_FILE} to your settings ✓` : "done");
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       setEditNote(
@@ -165,6 +170,35 @@ export default function AgentDemo() {
       );
     } finally {
       setEditing(false);
+    }
+  };
+
+  // R3-612 / R-IX-5 — where a thing can be created it can be removed: this control
+  // created demo.txt in the settings mount, so the SAME mount takes it back. The
+  // typed `FsError` codes surface verbatim — a read-only mount's refusal is the
+  // honest answer, never a fake success.
+  const [removing, setRemoving] = useState(false);
+
+  const removeDemoFile = async () => {
+    setRemoving(true);
+    setEditNote(null);
+    try {
+      const settings = await openSettings();
+      await openFs(settings).rm(DEMO_FILE);
+      setEditNote(`removed ${DEMO_FILE} from your settings`);
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      setEditNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "auth-required"
+            ? "sign in to use a space"
+            : code === "forbidden"
+              ? "forbidden — this app cannot remove from the settings mount"
+              : code,
+      );
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -325,12 +359,17 @@ export default function AgentDemo() {
           read-only delegation is a real <code>EROFS</code> wall. Your grant narrows;
           it never amplifies (G7):
         </p>
-        <button type="button" className="ad-run" disabled={editing} onClick={editFile}>
-          {editing ? "Editing…" : "Edit demo.txt in my space"}
-        </button>
+        <div className="ad-escape-actions">
+          <button type="button" className="ad-run" disabled={editing || removing} onClick={editFile}>
+            {editing ? "Editing…" : `Edit ${DEMO_FILE} in my space`}
+          </button>
+          <button type="button" className="ad-run" disabled={editing || removing} onClick={() => void removeDemoFile()}>
+            {removing ? "Removing…" : `Remove ${DEMO_FILE}`}
+          </button>
+        </div>
         {editNote && (
           <p className="ad-escape-sub">
-            edit-file → <span className="ad-err">{editNote}</span>
+            {DEMO_FILE} → <span className="ad-err">{editNote}</span>
           </p>
         )}
       </div>
