@@ -1,6 +1,7 @@
 // Repository scoping for the conversation list (R3-475). Pure: the panel derives
-// the current repo from its conferred worktree mount and partitions the store's
-// metas here, so the rule is unit-testable without React or a host.
+// the current repo from `useWorkspace()` (the workspace the host projects to the
+// panel — the conferred-worktree derivation was rejected) and partitions the
+// store's metas here, so the rule is unit-testable without React or a host.
 
 import type { ConversationMeta } from './conversationModel';
 

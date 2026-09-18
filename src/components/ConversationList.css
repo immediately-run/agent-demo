@@ -178,3 +178,18 @@
   font-size: 11px;
   opacity: 0.55;
 }
+/* Visually-hidden real text (R3-475): the accessible form of the count it sits
+   inside — the visible digit beside it is aria-hidden. The standard clip pattern,
+   so the text reaches assistive tech without touching layout. */
+.cl-vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
