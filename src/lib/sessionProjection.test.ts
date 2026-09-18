@@ -48,7 +48,7 @@ describe('deriveSessionProjection — the R-CT-1/R-CT-2 gate facts (R3-631)', ()
   it('REAL PRODUCER: a record from the store save path derives correctly, and the save bumps what the doc carries', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1000);
-    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
     const made = await store.create(undefined, 'owner/repo');
     expect(deriveSessionProjection(made, false, 1000).active).toBe(false); // empty transcript
     vi.setSystemTime(2000);

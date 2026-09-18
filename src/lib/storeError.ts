@@ -71,3 +71,54 @@ export function describeStoreFailure(e: unknown, suffix = ""): string {
   const detail = parts.length ? parts.join(" ← ") : label(e);
   return `Conversations can't be saved (${detail})${suffix}.`;
 }
+
+// ── R3-561: the advisory run lease's two outcomes, as copy ────────────────────
+//
+// WHY HERE. `append` rejects with one of two typed codes when this frame does not
+// hold the lease, and both are UX states rather than codes to print
+// (AGENT_RUN_DURABILITY_SPEC §9). Three run catches consume them — `run` and
+// `resumeRun` in ConversationStage, and CodingAgent's — and the first attempt
+// pasted the discrimination into two of them and missed the third, which is
+// exactly what a pasted block does. `isJournalRefusal` beside it is the existing
+// precedent for code discrimination living in `lib` rather than in a `.tsx`, and
+// this module is already the tested home for store-error copy.
+
+/** `append` refused because this frame does not hold the run lease. Either the
+ *  conversation was deleted under it, or another frame took the lease. */
+export type LeaseFailure = 'conversation-removed' | 'lease-lost';
+
+/** Which of the two, or `null` for anything else. The ONE place the codes are
+ *  matched — a caller that re-spells them is the bug this function exists to
+ *  prevent. */
+export function leaseFailure(e: unknown): LeaseFailure | null {
+  const c = isObj(e) ? e.code : undefined;
+  return c === 'conversation-removed' || c === 'lease-lost' ? c : null;
+}
+
+/**
+ * What to tell the user, given a lease failure and whether this surface can offer
+ * a takeover.
+ *
+ * `canTakeOver` exists because the two surfaces honestly differ: ConversationStage
+ * raises a takeover banner, CodingAgent has no affordance row and deliberately
+ * does not invent one. R-ARD-18a still forbids a dead end, so the no-takeover copy
+ * names what ACTUALLY frees the lease — its TTL — rather than an action the
+ * component does not ship. Naming an affordance that is not there is the placebo
+ * this split avoids.
+ */
+export function leaseFailureText(failure: LeaseFailure, canTakeOver: boolean): string {
+  if (failure === 'conversation-removed') {
+    return 'This conversation was deleted while the run was going, so the run stopped here. The file changes it already made stay.';
+  }
+  return canTakeOver
+    ? 'Another window took over this conversation, so this one stopped rather than driving the same files. Nothing here was lost — reopen it there, or take it back below.'
+    : 'Another window took over this conversation, so this one stopped rather than driving the same files. Nothing here was lost — carry on in that window, or wait about a minute and run again: it frees up on its own once that window is gone.';
+}
+
+/** The copy for `acquireRun` answering `held` — the run never started. Same
+ *  `canTakeOver` split, and the same reason for it. */
+export function leaseHeldText(canTakeOver: boolean): string {
+  return canTakeOver
+    ? 'Another window may be running this conversation. Only one should drive the files at a time — take over if that window is gone.'
+    : 'Another window may be running this conversation. Only one should drive the files at a time. Carry on in that window, or wait about a minute and run again: it frees up on its own once that window is gone.';
+}

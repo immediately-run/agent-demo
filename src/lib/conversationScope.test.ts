@@ -47,7 +47,7 @@ describe('scopeConversations', () => {
 // (§4: the producer of the metas the scope rule consumes).
 describe('conversation repo stamping', () => {
   it('create stamps the repo and list projects it', async () => {
-    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs() });
+    const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
     await store.create(undefined, 'acme/app');
     await store.create(); // unscoped (no workspace at creation)
     const metas = await store.list();
@@ -56,10 +56,10 @@ describe('conversation repo stamping', () => {
 
   it('a legacy record is stamped by a later save and survives a reload', async () => {
     const fs = new MemFs();
-    const store = createConversationStore({ recordRoot: '/settings', fs });
+    const store = createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' });
     const legacy = await store.create(); // unstamped
     await store.save({ ...legacy, repo: legacy.repo ?? 'acme/app' }); // the stage's save rule
-    const reloaded = await createConversationStore({ recordRoot: '/settings', fs }).load(legacy.id);
+    const reloaded = await createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' }).load(legacy.id);
     expect(reloaded?.repo).toBe('acme/app');
   });
 });

@@ -26,6 +26,7 @@ import { runAgent, type RunState } from "../lib/agentLoop";
 import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
+import { useLeaseRefresh } from "../hooks/useLeaseRefresh";
 import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
 import {
   openSessionProjectionWriter,
@@ -39,7 +40,7 @@ import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
-import { describeStoreFailure as describe } from "../lib/storeError";
+import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
 
 // R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
@@ -104,6 +105,13 @@ export default function ConversationStage() {
   // chatbot that re-reads nothing between turns. That failure used to be
   // swallowed by empty `catch {}`s — surface it instead (R3-247).
   const [storeError, setStoreError] = useState<string | null>(null);
+  /** R3-561 — another frame's run lease is live on this conversation. Renders as
+   *  an OFFER to take over, never as a block (R-ARD-18a): the lease is advisory,
+   *  the holder may be a window that no longer exists, and a hard block on it is a
+   *  dead end the user cannot escape. Carries the action that was refused, so
+   *  "take over" continues what the user asked for rather than making them ask
+   *  twice. */
+  const [leaseHeld, setLeaseHeld] = useState<null | { convId: string; resume: boolean }>(null);
   // R3-560: an interrupted run detected on this conversation — the journal says
   // a run was in flight and never reached its final `runEnd` B4. Resume is
   // ATTENDED (R-ARD-15): rendering this affordance is all the boot path does;
@@ -170,6 +178,42 @@ export default function ConversationStage() {
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
+  // R3-561 / R-ARD-18: refresh the lease on an interval while the run executes.
+  // Shared with CodingAgent — the other run surface — rather than living here; see
+  // `useLeaseRefresh` for why the boundary appends are not enough on their own,
+  // and for why this loop does NOT raise the takeover offer (it cannot: the banner
+  // renders only when the run is not running). A lost lease is surfaced by the
+  // run's own catch below, from the typed code `append` rejects with.
+  useLeaseRefresh(storeRef, runningIdRef, running);
+
+  /**
+   * R3-561 — hand the run's lease back, from both run paths.
+   *
+   * ONE function because there were two copies and the second had already drifted:
+   * `run`'s fired it, `resumeRun`'s awaited it, and the paragraph arguing against
+   * awaiting had been dropped from the second copy. The file held the argument and
+   * its violation ninety lines apart.
+   *
+   * It releases `runningIdRef`, NOT `convRef` — the conversation the RUN held, not
+   * the one on screen. Selecting another conversation mid-run sets `convRef`
+   * (`stageSelection`: "a run for a different conversation does not gate the
+   * reload") while the loop keeps going, so releasing what is on screen freed
+   * nothing and left the real lease to sit out its full TTL — offering a second
+   * window a takeover of a run that had already finished, which is the one thing
+   * this call exists to prevent. Callers invoke it BEFORE clearing `runningIdRef`.
+   *
+   * Fired, never awaited. Failing to run at all is already the expected case (no
+   * unload handler reaches it), so making a run's promise wait on a device-local
+   * read + unlink with no deadline would buy nothing and could leave it pending —
+   * the argument `APPEND_TIMEOUT_MS` makes one file over. The TTL and same-tab
+   * reclaim are what actually free a lease.
+   */
+  const releaseHeldLease = useCallback(() => {
+    const store = storeRef.current;
+    const id = runningIdRef.current;
+    if (store && id) void store.releaseRun(id).catch(() => {});
+  }, []);
+
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
     setConvId(conv.id);
@@ -183,6 +227,12 @@ export default function ConversationStage() {
     // rendered is the REPLAYED one — the record alone is folded through the last
     // run end and would show a blank/stale view over a live tail (R-ARD-15).
     setPendingResume(null);
+    // R3-561: the takeover offer belongs to the conversation that raised it. Left
+    // standing across a switch it would take over the NEW one — `takeOverRun`
+    // deliberately consults no stored lease, so it would evict a live holder of a
+    // conversation the user never asked about. Cleared here, and the render below
+    // carries a `convId` guard the way `pendingResume` does.
+    setLeaseHeld(null);
     const store = storeRef.current;
     if (store?.hasJournal()) {
       const promise = store
@@ -386,6 +436,25 @@ export default function ConversationStage() {
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     }
+    // R3-561 / R-ARD-18: take the advisory run lease before executing anything.
+    // A live lease held by another frame means the conversation may be running in
+    // a window this one cannot see, and driving one working tree from two loops is
+    // what the lease exists to avoid. `held` is an OFFER, never a block — see
+    // `leaseHeld` — because the holder may be a frame that no longer exists.
+    if (store && conv) {
+      try {
+        if ((await store.acquireRun(conv.id)) === "held") {
+          setLeaseHeld({ convId: conv.id, resume: false });
+          return;
+        }
+      } catch (e) {
+        // Wrapped for the same reason `store.create` three lines up is (R3-247): a
+        // store call that rejects must not reach the user as an unhandled rejection
+        // from a bare `void run()`. A lease we cannot read is not a lease we lost —
+        // say the store is degraded and run, rather than refusing on an unknown.
+        setStoreError(describe(e, NO_STORE_SUFFIX));
+      }
+    }
     // R3-559: the checkpoint journal. When the device-local tier is wired, every
     // loop boundary is appended before the loop proceeds past it (B2 intent is
     // durable BEFORE its executor runs — R-ARD-10a); an append that fails or
@@ -533,7 +602,18 @@ export default function ConversationStage() {
         }
       }
     } catch (e) {
-      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-561: the two lease codes are UX states, not codes to print (§9). The
+      // discrimination and the copy live in `lib/storeError` — pasting them here
+      // is what made the resume catch below get missed the first time.
+      const lease = leaseFailure(e);
+      if (lease) {
+        append({ kind: "error", text: leaseFailureText(lease, true) });
+        if (lease === "lease-lost") {
+          setLeaseHeld({ convId: runningIdRef.current ?? convRef.current?.id ?? "", resume: false });
+        }
+      } else {
+        append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      }
       // R3-559 (R-ARD-10a): a failed checkpoint append unwinds the run here. Name
       // the durability consequence — the run stopped AT a boundary and everything
       // checkpointed so far survives (the journal stays resumable).
@@ -549,6 +629,7 @@ export default function ConversationStage() {
       setStreaming("");
       setThinking("");
       setRunning(false);
+      releaseHeldLease(); // BEFORE runningIdRef is cleared — it is the id to release
       runningIdRef.current = null;
       abortRef.current = null;
       publisherRef.current?.onRunEnd();
@@ -587,6 +668,19 @@ export default function ConversationStage() {
         text: "No app workspace is connected yet. Open an app in the stage (and give it a moment to mount) before resuming — I won't touch my own files.",
       });
       return;
+    }
+    // R3-561: same gate as a fresh Run. A reload mid-run is a NEW frame with a new
+    // tabId, so same-tab reclaim does not cover it and the dead frame's lease is
+    // still live until its TTL — which is exactly the case the takeover offer is
+    // for. The host cannot tell a reload from a second tab, and pretending it can
+    // would be the double-drive this mechanism exists to prevent.
+    try {
+      if ((await store.acquireRun(conv.id)) === "held") {
+        setLeaseHeld({ convId: conv.id, resume: true });
+        return;
+      }
+    } catch (e) {
+      setStoreError(describe(e, NO_STORE_SUFFIX));
     }
     setPendingResume(null);
     const replay = pending.replay;
@@ -687,7 +781,19 @@ export default function ConversationStage() {
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     } catch (e) {
-      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-561: the same mapping as `run`'s catch. This is the path the takeover
+      // button itself invokes, so a user who takes over a resumable run and loses
+      // the lease again lands here — it printed the raw internal string until the
+      // discrimination moved into `lib/storeError`.
+      const lease = leaseFailure(e);
+      if (lease) {
+        append({ kind: "error", text: leaseFailureText(lease, true) });
+        if (lease === "lease-lost") {
+          setLeaseHeld({ convId: runningIdRef.current ?? convRef.current?.id ?? "", resume: true });
+        }
+      } else {
+        append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      }
       if (isJournalRefusal(e)) {
         setStoreError(describe(e, JOURNAL_REFUSAL_SUFFIX));
       }
@@ -700,6 +806,7 @@ export default function ConversationStage() {
       setStreaming("");
       setThinking("");
       setRunning(false);
+      releaseHeldLease(); // BEFORE runningIdRef is cleared — it is the id to release
       runningIdRef.current = null;
       abortRef.current = null;
       publisherRef.current?.onRunEnd();
@@ -847,6 +954,46 @@ export default function ConversationStage() {
             </button>
             <button type="button" className="ca-steer-btn" onClick={() => void keepAndClose()}>
               Keep the files and end the run
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* R3-561 / R-ARD-18a — the lease renders as an OFFER. The copy says "may be",
+          not "is", because that is the honest strength of an advisory lease: the
+          holder could be a live window, or a frame that was torn down without an
+          unload handler and whose lease is simply waiting out its TTL. Taking over
+          continues the action that was refused, so the user does not have to ask
+          twice. */}
+      {leaseHeld && !running && leaseHeld.convId === convId && (
+        <div className="ca-line ca-error" role="status">
+          <span className="ca-err">{leaseHeldText(true)}</span>
+          <div className="ca-resume-row">
+            <button
+              type="button"
+              className="ca-run"
+              onClick={() => {
+                const { resume: wasResume, convId: forConv } = leaseHeld;
+                void (async () => {
+                  try {
+                    const store = storeRef.current;
+                    // The offer stays up until the takeover actually lands. An
+                    // earlier version dismissed it first, so a rejected write left
+                    // the user with no offer, no run and no message.
+                    if (store) await store.takeOverRun(forConv);
+                    setLeaseHeld(null);
+                  } catch (e) {
+                    setStoreError(describe(e, NO_STORE_SUFFIX));
+                    return;
+                  }
+                  await (wasResume ? resumeRun() : run());
+                })();
+              }}
+            >
+              Take over
+            </button>
+            <button type="button" className="ca-steer-btn" onClick={() => setLeaseHeld(null)}>
+              Leave it alone
             </button>
           </div>
         </div>

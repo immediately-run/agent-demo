@@ -25,6 +25,8 @@ import { openConversationStore, deriveTitle, type ConversationStore } from "../l
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
+import { leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
+import { useLeaseRefresh } from "../hooks/useLeaseRefresh";
 import "./CodingAgent.css";
 
 /** R-ARD-10: the row for a run that cannot be persisted at all (no store — no
@@ -45,6 +47,9 @@ export default function CodingAgent() {
   // arrives and becomes a transcript row).
   const [thinking, setThinking] = useState("");
   const [running, setRunning] = useState(false);
+  /** R3-561: which conversation this run holds the lease on, for the refresh
+   *  interval below (a ref, so arming it does not wait for a render). */
+  const runningIdRef = useRef<string | null>(null);
 
   // Persistence (Phase 01): keep this run in a durable conversation so it survives
   // reload. Best-effort — `openSettings()` is inert in local dev / signed out, so a
@@ -114,6 +119,13 @@ export default function CodingAgent() {
 
   const append = (e: LogEntry) => setLog((l) => [...l, e]);
 
+  // R3-561 / R-ARD-18: this surface runs and appends exactly as ConversationStage
+  // does, so it refreshes the lease on the same interval. Round 1 fixed the stage
+  // only; the argument — a model turn outlasts the TTL and boundary appends cannot
+  // cover it — was never specific to that component, and this is the surface where
+  // a second frame is most reachable, since it adopts the newest conversation.
+  useLeaseRefresh(storeRef, runningIdRef, running);
+
   const run = async () => {
     if (!prompt.trim() || running) return;
     setRunning(true);
@@ -150,6 +162,38 @@ export default function CodingAgent() {
         text: "Checkpoints are off (no device-local store) — closing this tab loses the in-flight turn; the conversation itself still saves when the run ends.",
       });
     }
+    // R3-561 / R-ARD-18: take the advisory run lease. This demo is the THIRD opener
+    // of the same store — the panel and the stage are the other two — and it adopts
+    // the NEWEST conversation at mount, so "the agents activity and this tab, same
+    // conversation" is reachable rather than theoretical. Without this the first
+    // append would throw and print internal copy about a lease the user never saw.
+    //
+    // No takeover BUTTON here, deliberately: this surface's whole UI is a prompt
+    // and a Run/Stop control, and inventing an affordance row for a demo would be
+    // the bespoke UI the run-mode rule warns against. R-ARD-18a still forbids a
+    // DEAD END, so the copy names what genuinely frees the lease — its TTL — and
+    // not an action this component does not have. (An earlier version said "start
+    // a new conversation here", which is an instruction the user cannot follow:
+    // there is no such control, and the mount effect re-adopts the newest
+    // conversation, so a reload lands on the same refusal.)
+    //
+    // The REFRESH, unlike the button, is not optional here — this surface runs and
+    // appends exactly as the stage does, so it gets the same `useLeaseRefresh`.
+    if (store && convRef.current) {
+      try {
+        if ((await store.acquireRun(convRef.current.id)) === "held") {
+          append({ kind: "error", text: leaseHeldText(false) });
+          setRunning(false);
+          abortRef.current = null;
+          return;
+        }
+      } catch (e) {
+        // A lease we cannot read is not a lease we lost. Say the store is degraded
+        // and run, rather than refusing on an unknown.
+        append(noStoreRow(e));
+      }
+    }
+    runningIdRef.current = convRef.current?.id ?? null;
     const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
@@ -209,12 +253,30 @@ export default function CodingAgent() {
       });
       await persist(transcript);
     } catch (e) {
-      append({ kind: "error", text: (e as Error)?.message ?? String(e) });
+      // R3-561: the two lease codes are UX states, not codes to print (§9). Same
+      // mapping as the stage's two catches, `canTakeOver: false` — this surface
+      // has no affordance row, so the copy names the TTL, which actually frees the
+      // lease, rather than a button it does not ship.
+      const lease = leaseFailure(e);
+      append(
+        lease
+          ? { kind: "error", text: leaseFailureText(lease, false) }
+          : { kind: "error", text: (e as Error)?.message ?? String(e) },
+      );
     } finally {
       setStreaming("");
       setThinking("");
       setRunning(false);
       abortRef.current = null;
+      // R3-561: hand the lease back — the id the RUN held, read before it is
+      // cleared, not whatever is on screen. Fired, not awaited; see
+      // `releaseHeldLease` in ConversationStage for the argument.
+      {
+        const store = storeRef.current;
+        const id = runningIdRef.current;
+        if (store && id) void store.releaseRun(id).catch(() => {});
+      }
+      runningIdRef.current = null;
     }
   };
 

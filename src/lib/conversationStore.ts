@@ -24,6 +24,17 @@ import type {
   ToolUseBlock,
 } from './agentLoop';
 import type { Conversation, ConversationMeta } from './conversationModel';
+import {
+  LEASE_HEARTBEAT_MS,
+  isExpired,
+  leaseVerdict,
+  mintLease,
+  nextHeartbeat,
+  parseLease,
+  stillHeld,
+  type Lease,
+  type LeaseVerdict,
+} from './lease';
 
 const DIR = 'conversations'; // subdir under each mount root
 const LIST_CAP = 500; // defensive cap on conversations surfaced
@@ -32,6 +43,32 @@ const TITLE_MAX = 60;
  *  (R-ARD-5a: a SUBDIRECTORY of the conversation — sibling `.json` files would
  *  make `list()` O(checkpoints) reads). */
 const JOURNAL_DIR = 'journal';
+/** R3-561 — the advisory run lease: `<journalRoot>/conversations/<id>/lease.json`,
+ *  a sibling of that conversation's `journal/` directory.
+ *
+ *  ON THE DEVICE-LOCAL TIER, not the synced record tier, for two reasons. The
+ *  first is a rule this file's own tests already assert: *"the record itself is
+ *  untouched by appends — the synced tier is not in the loop's hot path"*
+ *  (R-ARD-6). A lease beside the RECORD would put a heartbeat write on the
+ *  Firestore-backed tier inside the run loop, which is the thing R-ARD-6 exists to
+ *  keep out of it. The second is that it is also the more correct home: what the
+ *  lease guards — `seq` allocation, journal appends, and the working tree the run
+ *  drives — is device-local, and a frame on another DEVICE cannot double-drive a
+ *  working tree it cannot reach, so a synced lease would refuse runs it has no
+ *  business refusing.
+ *
+ *  It follows that a JOURNALLESS store has no lease. That is coherent rather than
+ *  a hole: `seq` does not exist, `append` rejects `journal-unavailable` whatever
+ *  the lease says, and the device-local mount is absent precisely because the
+ *  browser or the capability refused it — the substrate two frames would
+ *  coordinate through is the one that is missing. Such a run is degraded and says
+ *  so (R-ARD-10); this is one more way in which it is.
+ *
+ *  Note the gate is INERT there rather than ordered behind that rejection: with no
+ *  `journalRoot`, `checkHold` answers true and `tryAcquire` answers `free`. An
+ *  earlier comment here claimed the ordering mattered; the review gate moved the
+ *  throw and nothing changed, so the claim is withdrawn rather than left standing. */
+const LEASE_FILE = 'lease.json';
 /** Bounded write (R-ARD-10a): a checkpoint append that has not settled within
  *  this budget is a failure — the loop never executes past an unwritten B2, and
  *  blocking forever would stall a run silently. */
@@ -184,6 +221,23 @@ export interface ConversationStore {
    *  fold with `patch.messages` is the fidelity-restoring write. Returns the
    *  persisted record. */
   fold(convId: string, patch?: { messages?: ChatMessage[]; title?: string; repo?: string }): Promise<Conversation>;
+  // ---- R3-561: the advisory run lease (AGENT_RUN_DURABILITY_SPEC §6) ----
+  /** Try to take the run lease. `free` ⇒ this frame may execute, allocate `seq`
+   *  and append; `held` ⇒ another frame's lease is still live and the caller
+   *  offers a TAKEOVER (never a hard block — R-ARD-18a). A lease this frame's own
+   *  `tabId` left behind is reclaimed immediately, which is what makes the
+   *  canonical teardown-and-return flow resumable rather than `held`. */
+  acquireRun(convId: string): Promise<LeaseVerdict>;
+  /** Take the lease over a live foreign one — the explicit user action behind the
+   *  `held` offer. */
+  takeOverRun(convId: string): Promise<void>;
+  /** Do we still hold it? Re-reads the stored lease when a heartbeat is due, and
+   *  refreshes it when we do. `false` means we lost it — someone took over, or the
+   *  conversation was removed under us. Call at each loop boundary. */
+  holdsRun(convId: string): Promise<boolean>;
+  /** Drop the lease if we hold it. Best-effort: no unload handler can be relied
+   *  on, so the TTL and same-tab reclaim are what actually free a lease. */
+  releaseRun(convId: string): Promise<void>;
 }
 
 const code = (e: unknown): string | undefined => (e as { code?: string })?.code;
@@ -249,6 +303,17 @@ export function createConversationStore(opts: {
   /** Device-local append tier. Absent ⇒ journalless store: runs are allowed and
    *  say so (R-ARD-10); `append` rejects `journal-unavailable`. */
   journalRoot?: string;
+  /** R3-561 — this FRAME's identity, stable for the life of the document. Same-tab
+   *  reclaim keys on it, so a per-store DEFAULT would defeat the reclaim R-ARD-18a
+   *  calls mandatory the moment a frame built a second store — and the panel and
+   *  the stage are exactly that. REQUIRED rather than defaulted for that reason:
+   *  the default this field used to carry was the very thing this comment warns
+   *  against. Production passes `documentTabId()`; tests pass a literal to play
+   *  two frames. */
+  tabId: string;
+  /** Injected clock (R3-561). Tests advance it to reach a heartbeat or a TTL
+   *  without timers. */
+  now?: () => number;
 }): ConversationStore {
   const p = opts.fs;
   const recordDir = `${opts.recordRoot.replace(/\/+$/, '')}/${DIR}`;
@@ -271,6 +336,140 @@ export function createConversationStore(opts: {
   // flight at once could write watermarks out of order. Chaining also makes the
   // run-end fold await any in-flight mid-run fold.
   const foldChain = new Map<string, Promise<unknown>>();
+
+  // ── R3-561: the advisory run lease ────────────────────────────────────────
+  // ADVISORY, and nothing here may say otherwise. There is no conditional write
+  // at the SDK's file surface, so the loser of a race is NOT detected by the
+  // store; two frames can both believe they hold a lease. See `lease.ts`.
+  const tabId = opts.tabId;
+  const clock = opts.now ?? (() => Date.now());
+  /** The lease we minted, per conversation, while we believe we hold it. Absent ⇒
+   *  this frame may not execute, allocate `seq` or append. */
+  const held = new Map<string, Lease>();
+  /** When each held lease is next due a re-read + refresh. */
+  const beatDue = new Map<string, number>();
+  /** Conversations this store HELD and then lost — taken over, or removed under
+   *  it. A latch, and the reason `append` does not simply re-acquire: silently
+   *  taking the lease back would resume a run the user moved to another window,
+   *  which is the double-drive this whole mechanism exists to avoid. Cleared only
+   *  by an explicit `acquireRun`/`takeOverRun`, i.e. by the user asking again. */
+  const lost = new Set<string>();
+  const leaseFile = (id: string): string => `${journalRoot}/${DIR}/${id}/${LEASE_FILE}`;
+
+  /**
+   * Read the stored lease.
+   *
+   * THREE outcomes, not two, and the third is load-bearing:
+   *   - a `Lease`         — it is there and well-formed
+   *   - `null`            — genuinely ABSENT (ENOENT, or bytes `parseLease` refuses)
+   *   - `'unreadable'`    — the mount could not answer
+   *
+   * Collapsing the third into `null` is a real bug, not a tidiness question,
+   * because the two callers want OPPOSITE defaults from it. `tryAcquire` is
+   * deciding whether it may start, so absent-reads-as-takeable is right there —
+   * fail toward letting the user work. `checkHold` is asking whether it still
+   * holds, and reading a fault as "someone took it" both ends the run and LATCHES
+   * the frame out, while our own unexpired lease is still on disk. The review gate
+   * measured it: one injected `EBUSY` refused every later append for the session
+   * and told the user another window had taken over, which had not happened.
+   */
+  const readLease = async (id: string): Promise<Lease | null | 'unreadable'> => {
+    if (!journalRoot) return null;
+    let raw: string;
+    try {
+      raw = await p.readFile(leaseFile(id), 'utf8');
+    } catch (e) {
+      // ENOENT is the ordinary "no lease yet". Anything else is the mount failing
+      // to answer a question we asked, which is not evidence about the lease.
+      return code(e) === 'ENOENT' ? null : 'unreadable';
+    }
+    return parseLease(raw); // malformed bytes ARE absence — `parseLease` says why
+  };
+
+  const writeLease = async (id: string, lease: Lease): Promise<void> => {
+    await p.mkdir(`${journalRoot}/${DIR}/${id}`, { recursive: true });
+    await p.writeFile(leaseFile(id), JSON.stringify(lease));
+    held.set(id, lease);
+    beatDue.set(id, clock() + LEASE_HEARTBEAT_MS);
+    lost.delete(id);
+  };
+
+  /** Take the lease if it is takeable. The one place a lease is minted. A
+   *  journalless store has no lease substrate, so it is always `free` — see
+   *  `LEASE_FILE`. */
+  const tryAcquire = async (id: string): Promise<LeaseVerdict> => {
+    if (!journalRoot) return 'free';
+    const now = clock();
+    const stored = await readLease(id);
+    // An unreadable mount reads as takeable HERE, deliberately: this caller is
+    // deciding whether the user may start, and refusing on a fault would strand
+    // them behind a lease nobody can even read. The opposite default belongs to
+    // `checkHold` — see `readLease`.
+    //
+    // `leaseVerdict`, not a second spelling of its body: the rule "takeable ⇒
+    // free" is decided in `lease.ts` and tested there, and a copy here would be a
+    // second place for it to drift.
+    if (leaseVerdict(stored === 'unreadable' ? null : stored, tabId, now) === 'held') return 'held';
+    await writeLease(id, mintLease(genId(), tabId, now));
+    return 'free';
+  };
+
+  const forget = (id: string, latch: boolean): void => {
+    if (latch && held.has(id)) lost.add(id);
+    held.delete(id);
+    beatDue.delete(id);
+  };
+
+  /**
+   * Do we hold the lease?
+   *
+   * The stored lease is re-read EVERY time, never cached behind the heartbeat
+   * window. An earlier version skipped the read until a beat was due, and the
+   * review gate measured what that bought: for up to a full `LEASE_HEARTBEAT_MS`
+   * after another frame took over, this one still answered `true` and kept
+   * appending into the new holder's journal. Colliding `seq`s OVERWRITE an entry
+   * rather than leave a gap, so `replay`'s contiguity check — the thing that would
+   * otherwise catch it — cannot see the damage at all. A read per boundary against
+   * the device-local tier is the cheapest correctness there is here.
+   *
+   * The beat still decides whether to WRITE a refresh, which is the expensive half.
+   */
+  const checkHold = async (id: string): Promise<boolean> => {
+    if (!journalRoot) return true; // nothing to coordinate — see `LEASE_FILE`
+    const mine = held.get(id);
+    if (!mine) return false;
+    const now = clock();
+    const stored = await readLease(id);
+    // A mount that could not answer is NOT evidence that we lost the lease — but
+    // it is not a licence to hold one forever either, and this branch returns
+    // BEFORE the refresh below, so a frame whose reads keep failing would both
+    // keep claiming the lease and stop writing heartbeats. The review gate measured
+    // that: across 2.5 TTLs of persistent EBUSY the frame answered `true` every
+    // time, its stored `expiresAt` never moved, a second frame's `acquireRun`
+    // answered `free`, and both then minted the same `seq` — one entry overwriting
+    // the other, which is the damage `replay`'s contiguity check cannot see.
+    //
+    // So the hold is bounded by the lease we already have, which is what "let the
+    // TTL decide" has to mean if it means anything. A transient fault is harmless
+    // (we are well inside our own expiry); a fault we can no longer justify holding
+    // through stops being a hold, and latches like any other loss.
+    if (stored === 'unreadable') {
+      if (!isExpired(mine, now)) return true;
+      forget(id, true);
+      return false;
+    }
+    if (!stillHeld(stored, mine.holderId)) {
+      forget(id, true); // taken over, or the conversation was removed under us
+      return false;
+    }
+    if (now >= (beatDue.get(id) ?? 0)) await writeLease(id, nextHeartbeat(mine, now));
+    return true;
+  };
+
+  /** Why we are not holding it — only ever read on the failure path, so the extra
+   *  record read costs nothing in the common case. */
+  const lostReason = async (id: string): Promise<'conversation-removed' | 'lease-lost'> =>
+    (await load(id)) === null ? 'conversation-removed' : 'lease-lost';
 
   const ensureDir = () => p.mkdir(recordDir, { recursive: true });
 
@@ -355,6 +554,26 @@ export function createConversationStore(opts: {
 
   const append = async (convId: string, b: LoopBoundary): Promise<number> => {
     if (!journalRoot) throw errWithCode('journal-unavailable', 'no device-local journal mount');
+    // R3-561 / R-ARD-18: only the lease holder allocates `seq` or appends. The
+    // check is BEFORE `nextSeq`, so a frame that does not hold the lease never
+    // mints a number — two frames minting from one journal head is the corruption
+    // this gate exists to prevent, and a minted-then-discarded seq is already a
+    // gap `replay`'s contiguity check would refuse.
+    //
+    // ACQUISITION IS IMPLICIT on the first append, and deliberately so. Three
+    // openers of this store ship today — the panel, the stage, and the standalone
+    // agent (§11) — and a gate that only rejected callers which forgot an explicit
+    // `acquireRun` would be a runtime regression in a shipped surface rather than
+    // a coordination mechanism. A first-time appender therefore takes the lease if
+    // it is takeable, which is what "only the holder may append" means when the
+    // holder set is empty.
+    //
+    // A LOST lease is NOT re-acquired. Once this frame has held and lost one, the
+    // latch refuses every later append until the user explicitly asks again —
+    // silently taking it back would resume a run the user moved to another window.
+    if (!(await checkHold(convId)) && (lost.has(convId) || (await tryAcquire(convId)) === 'held')) {
+      throw errWithCode(await lostReason(convId), 'this frame does not hold the run lease');
+    }
     const payload = boundEntryPayload(b) as Partial<JournalEntry>;
     // Bounded write (R-ARD-10a): the WHOLE append path — seq seeding (which may
     // read the journal dir and, on a cold boot, the record's fold watermark on
@@ -670,14 +889,69 @@ export function createConversationStore(opts: {
       // R-ARD-5c: deleting the conversation reclaims its journal — abandoned
       // journals must not accumulate in a quota-bearing store.
       if (journalRoot) await rmTree(`${journalRoot}/${DIR}/${id}`);
+      // R3-561 / R-ARD-18b: `remove` is NOT lease-gated — the panel and the stage
+      // are the same app on the same mount, and gating the panel's writes would
+      // break a shipped surface. The `rmTree` above takes the lease with it (it
+      // is a sibling of `journal/` under the same directory), which is exactly how
+      // a holder mid-run FINDS OUT: its next boundary reads an absent lease, drops
+      // its hold, and `append` rejects `conversation-removed`. The run stops there
+      // rather than folding the record back into existence.
+      forget(id, false); // our own delete: nothing to latch against
     },
 
     hasJournal: () => journalRoot !== undefined,
     append,
     replay,
     fold,
+
+    acquireRun: tryAcquire,
+
+    async takeOverRun(convId) {
+      // The explicit user action behind the `held` offer. It does not consult the
+      // stored lease: the point of a takeover is that the user has decided the
+      // other window is not really running this.
+      //
+      // The `journalRoot` guard is not decoration. `writeLease` interpolates it,
+      // so without this a journalless store wrote `undefined/conversations/<id>/
+      // lease.json` — a relative path in neither mount — and then reported
+      // `holdsRun` true off the in-memory copy. Every other lease method guards;
+      // this one did not.
+      if (!journalRoot) return;
+      await writeLease(convId, mintLease(genId(), tabId, clock()));
+    },
+
+    holdsRun: checkHold,
+
+    async releaseRun(convId) {
+      const mine = held.get(convId);
+      forget(convId, false); // a deliberate release is not a loss — no latch
+      if (!mine) return;
+      // Only delete a lease that is still OURS — a takeover may have replaced it
+      // while we were working, and deleting the new holder's lease would hand the
+      // conversation to whoever asked next. This NARROWS that window, it does not
+      // close it: the read and the unlink are two awaits apart and there is no
+      // conditional delete to make them one, so a takeover landing between them is
+      // still deleted. Said plainly because the rest of this mechanism is careful
+      // not to overclaim.
+      const stored = await readLease(convId);
+      if (stored === 'unreadable' || !stillHeld(stored, mine.holderId)) return;
+      if (!journalRoot) return;
+      try {
+        await p.unlink(leaseFile(convId));
+      } catch {
+        /* best-effort: the TTL and same-tab reclaim are what actually free it */
+      }
+    },
   };
 }
+
+/** This FRAME's identity for the life of the document (R3-561). Module-level, so
+ *  two stores built in one frame — the panel and the stage are the same app —
+ *  share it and each can reclaim the other's lease. It never leaves the frame and
+ *  it is not persisted, which is the point: a reload is a NEW frame, and the lease
+ *  it left behind is freed by its TTL rather than reclaimed by identity. */
+let TAB_ID: string | undefined;
+const documentTabId = (): string => (TAB_ID ??= genId());
 
 /**
  * Production factory: resolve the app's settings mount (record tier) and the
@@ -699,5 +973,6 @@ export async function openConversationStore(): Promise<ConversationStore> {
     recordRoot: recordMount.path,
     ...(journalRoot !== undefined ? { journalRoot } : {}),
     fs: fs.promises as unknown as StoreFs,
+    tabId: documentTabId(),
   });
 }

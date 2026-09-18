@@ -12,7 +12,12 @@ import { applyConversationUpdate } from "./conversationUpdate";
 // Inputs come from the REAL fs-injected store (R2: one input per producer from
 // calling that producer) — a conversation is created and saved through the store
 // and its returned records drive the assertions, never a hand-typed literal.
-const store = (fs: MemFs) => createConversationStore({ recordRoot: "/settings", fs });
+const store = (fs: MemFs) =>
+  createConversationStore({
+    recordRoot: "/settings",
+    fs,
+    tabId: "tab-conversation-update",
+  });
 
 describe("applyConversationUpdate — one message patches one row (R3-612 / R-IX-4)", () => {
   it("replaces the matching row, bumps it by updatedAt, and re-orders newest-first", async () => {

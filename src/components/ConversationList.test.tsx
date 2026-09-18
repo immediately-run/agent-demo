@@ -8,19 +8,27 @@
 // the ONE row it names without re-listing the store (R-IX-4). Rows come from the
 // REAL fs-injected store over MemFs — never a hand-typed array (R2).
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  cleanup,
+} from "@testing-library/react";
 
 vi.mock("@immediately-run/sdk", () => ({
   postToRegion: vi.fn(async () => {}),
   revealRegion: vi.fn(async () => {}),
   useWorkspace: vi.fn(() => null),
-  onRegionMessage: vi.fn((listener: (m: { from: string; data: unknown }) => void) => {
-    regionListeners.push(listener);
-    return () => {
-      const i = regionListeners.indexOf(listener);
-      if (i >= 0) regionListeners.splice(i, 1);
-    };
-  }),
+  onRegionMessage: vi.fn(
+    (listener: (m: { from: string; data: unknown }) => void) => {
+      regionListeners.push(listener);
+      return () => {
+        const i = regionListeners.indexOf(listener);
+        if (i >= 0) regionListeners.splice(i, 1);
+      };
+    },
+  ),
 }));
 
 // The store is REAL (fs-injected core over MemFs); only its mount resolution is
@@ -28,10 +36,13 @@ vi.mock("@immediately-run/sdk", () => ({
 // store, created through the store itself — the list test fixture is store output,
 // not a literal. (The vi.mock factory below is hoisted, so it reaches the impl
 // through this holder rather than a top-level const.)
-const storeHolder = vi.hoisted(() => ({ make: null as null | (() => Promise<unknown>) }));
+const storeHolder = vi.hoisted(() => ({
+  make: null as null | (() => Promise<unknown>),
+}));
 
 vi.mock("../lib/conversationStore", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/conversationStore")>();
+  const actual =
+    await importOriginal<typeof import("../lib/conversationStore")>();
   return { ...actual, openConversationStore: () => storeHolder.make!() };
 });
 
@@ -46,7 +57,11 @@ let lastStore: SpiedStore | null = null;
 const makeStore = async (): Promise<SpiedStore> => {
   const { createConversationStore } = await import("../lib/conversationStore");
   const { MemFs } = await import("../lib/testing/memStoreFs");
-  const base = createConversationStore({ recordRoot: "/settings", fs: new MemFs() });
+  const base = createConversationStore({
+    recordRoot: "/settings",
+    fs: new MemFs(),
+    tabId: "tab-conversation-list",
+  });
   await base.create("notes");
   const wrapped = {
     ...base,
@@ -126,7 +141,9 @@ describe("ConversationList — the row is two controls, two names (R3-612 / WCAG
 
     postFromStage({ type: "conversation-updated", id });
 
-    await waitFor(() => expect(screen.getByText("notes, renamed")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("notes, renamed")).toBeTruthy(),
+    );
     expect(lastStore!.list.mock.calls.length).toBe(listCalls);
     expect(lastStore!.load).toHaveBeenCalledWith(id);
   });

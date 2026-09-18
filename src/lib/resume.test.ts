@@ -44,7 +44,7 @@ interface KilledRun {
  *  append fails, which unwinds the run at exactly that boundary). */
 async function killedMidBatch(): Promise<KilledRun> {
   const fs = new MemFs();
-  const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+  const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
   const conv = await store.create();
   const client: ModelClient = {
     async createMessage() {
@@ -87,7 +87,7 @@ async function killedMidBatch(): Promise<KilledRun> {
  *  the run at that B1 leaves dangling calls with NO B2 — provably never issued. */
 async function killedInTruncationWindow(): Promise<KilledRun> {
   const fs = new MemFs();
-  const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+  const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
   const conv = await store.create();
   const client: ModelClient = {
     async createMessage() {
@@ -120,7 +120,7 @@ async function killedInTruncationWindow(): Promise<KilledRun> {
   return { fs, convId: conv.id, err };
 }
 
-const reopen = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs });
+const reopen = (fs: MemFs) => createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 'tab-test' });
 
 // ---- repair (R-ARD-11 / R-ARD-12) --------------------------------------------------
 
@@ -211,7 +211,7 @@ describe('resume — attended: booting an interrupted journal executes nothing u
       writes.push(path);
       return killed.fs.writeFile(path, data);
     };
-    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: spyFs });
+    const store = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: spyFs, tabId: 'tab-test' });
 
     // BOOT: exactly what ConversationStage.showConversation does — replay,
     // detect, repair. No model client exists on this path at all.
@@ -227,6 +227,13 @@ describe('resume — attended: booting an interrupted journal executes nothing u
     // THE USER ACTS. Only now does a model client exist — and its first request
     // carries the repaired transcript, byte-for-byte, with no synthesised user
     // turn appended to fit the fresh-run shape.
+    //
+    // R3-561: the resume action takes the run lease first, exactly as
+    // `ConversationStage.resumeRun` does. It is needed HERE and not on the boot
+    // path above because the killed run's frame left a live lease behind and this
+    // is a new frame — a reload mid-run is the case R-ARD-18a's takeover offer is
+    // for, and taking the lease is what the user clicking Resume means.
+    await store.takeOverRun(killed.convId);
     const seen: { messages: ChatMessage[]; system?: string; tools: AgentTool[] }[] = [];
     const client: ModelClient = {
       async createMessage(req) {
@@ -277,7 +284,7 @@ describe('resume — fold-only: the second-device view repairs with the loss bou
     // The SECOND DEVICE: the same record bytes, an empty local journal.
     const device2Fs = new MemFs();
     for (const [p, v] of killed.fs.files) if (p.startsWith('/settings/')) device2Fs.files.set(p, v);
-    const device2 = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: device2Fs });
+    const device2 = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs: device2Fs, tabId: 'tab-device-2' });
     const replay = await device2.replay(killed.convId);
     expect(replay.journalDepth).toBe(0); // no device-local entries — the fold-only view
     expect(interrupted(replay)).toBe(false); // nothing is auto-offered from the record alone
