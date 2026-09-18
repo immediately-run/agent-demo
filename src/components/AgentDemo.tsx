@@ -156,7 +156,7 @@ export default function AgentDemo() {
       const res = await invokeTask<{ saved: boolean }>("edit-file", {
         file: capFile({ mountId: settings.id ?? settings.path, relPath: DEMO_FILE }, { mode: "rw" }),
       });
-      setEditNote(res?.saved ? "saved demo.txt to your settings ✓" : "done");
+      setEditNote(res?.saved ? `saved ${DEMO_FILE} to your settings ✓` : "done");
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "error";
       setEditNote(
@@ -361,10 +361,10 @@ export default function AgentDemo() {
         </p>
         <div className="ad-escape-actions">
           <button type="button" className="ad-run" disabled={editing || removing} onClick={editFile}>
-            {editing ? "Editing…" : "Edit demo.txt in my space"}
+            {editing ? "Editing…" : `Edit ${DEMO_FILE} in my space`}
           </button>
           <button type="button" className="ad-run" disabled={editing || removing} onClick={() => void removeDemoFile()}>
-            {removing ? "Removing…" : "Remove demo.txt"}
+            {removing ? "Removing…" : `Remove ${DEMO_FILE}`}
           </button>
         </div>
         {editNote && (
