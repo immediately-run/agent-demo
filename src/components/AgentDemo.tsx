@@ -10,6 +10,7 @@ import {
   postToRegion,
   invokeTask,
   capFile,
+  openFs,
   openSettings,
   type ApiMethod,
 } from "@immediately-run/sdk";
@@ -165,6 +166,33 @@ export default function AgentDemo() {
       );
     } finally {
       setEditing(false);
+    }
+  };
+
+  // R3-612 / R-IX-5 — where a thing can be created it can be removed: this control
+  // created demo.txt in the settings mount, so the SAME mount takes it back. The
+  // typed `FsError` codes surface verbatim — a read-only mount's refusal is the
+  // honest answer, never a fake success.
+  const [removing, setRemoving] = useState(false);
+
+  const removeDemoFile = async () => {
+    setRemoving(true);
+    setEditNote(null);
+    try {
+      const settings = await openSettings();
+      await openFs(settings).rm("demo.txt");
+      setEditNote("removed demo.txt from your settings");
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? "error";
+      setEditNote(
+        code === "cancelled"
+          ? "cancelled"
+          : code === "auth-required"
+            ? "sign in to use a space"
+            : code,
+      );
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -325,9 +353,14 @@ export default function AgentDemo() {
           read-only delegation is a real <code>EROFS</code> wall. Your grant narrows;
           it never amplifies (G7):
         </p>
-        <button type="button" className="ad-run" disabled={editing} onClick={editFile}>
-          {editing ? "Editing…" : "Edit demo.txt in my space"}
-        </button>
+        <div className="ad-escape-actions">
+          <button type="button" className="ad-run" disabled={editing || removing} onClick={editFile}>
+            {editing ? "Editing…" : "Edit demo.txt in my space"}
+          </button>
+          <button type="button" className="ad-run" disabled={editing || removing} onClick={() => void removeDemoFile()}>
+            {removing ? "Removing…" : "Remove demo.txt"}
+          </button>
+        </div>
         {editNote && (
           <p className="ad-escape-sub">
             edit-file → <span className="ad-err">{editNote}</span>

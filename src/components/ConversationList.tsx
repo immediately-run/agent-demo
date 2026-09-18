@@ -15,6 +15,7 @@ import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@imme
 import { openConversationStore, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations } from "../lib/conversationScope";
+import { applyConversationUpdate } from "../lib/conversationUpdate";
 import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
@@ -132,11 +133,37 @@ export default function ConversationList() {
     };
   }, []);
 
-  // Keep the list fresh: the stage posts "updated" when it derives a title or saves;
-  // also re-list when the panel regains focus (cheap belt-and-suspenders).
+  // Keep the list fresh. A `conversation-updated` message names ONE conversation,
+  // so the handler loads that row and patches it in place (R3-612 / R-IX-4) — a
+  // full `list()` re-reads every conversation JSON (cap 500) to learn one row's
+  // title and timestamp moved. `refresh()` stays for the focus-regain path, where
+  // there is no narrower signal; the mount path lists directly (it needs the
+  // store-open error handling too).
+  const patchOne = useCallback(async (id: string) => {
+    const store = storeRef.current;
+    if (!store) return;
+    try {
+      const conv = await store.load(id);
+      // `null` = deleted elsewhere (or corrupt): the row goes.
+      setItems((l) =>
+        conv
+          ? applyConversationUpdate(l, {
+              id: conv.id,
+              title: conv.title,
+              createdAt: conv.createdAt,
+              updatedAt: conv.updatedAt,
+              ...(conv.repo !== undefined ? { repo: conv.repo } : {}),
+            })
+          : l.filter((c) => c.id !== id),
+      );
+    } catch {
+      /* transient read failure — keep the last good list */
+    }
+  }, []);
+
   useEffect(() => {
     const off = onRegionMessage((m) => {
-      if (isUpdated(m.data)) void refresh();
+      if (isUpdated(m.data)) void patchOne(m.data.id);
       // The stage mounted and wants to know what it should be showing (R3-243). It
       // may have missed the `select-conversation` entirely: on mobile it does not
       // exist until the reveal puts it on screen, which happens after the post.
@@ -152,7 +179,7 @@ export default function ConversationList() {
       off();
       window.removeEventListener("focus", onFocus);
     };
-  }, [refresh]);
+  }, [refresh, patchOne]);
 
   const newConversation = async () => {
     const store = storeRef.current;
@@ -219,32 +246,26 @@ export default function ConversationList() {
 
       <ul className="cl-list">
         {mine.map((c) => (
-          <li
-            key={c.id}
-            className={`cl-row${effectiveSelected === c.id ? " cl-row-active" : ""}`}
-            onClick={() => openConversation(c.id)}
-            tabIndex={0}
-            role="button"
-            aria-pressed={effectiveSelected === c.id}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                openConversation(c.id);
-              }
-            }}
-          >
-            <span className="cl-row-main">
+          <li key={c.id} className={`cl-row${effectiveSelected === c.id ? " cl-row-active" : ""}`}>
+            {/* R3-612 — the open action is a REAL button over the row's main
+                content: a row-level button role containing this control made the
+                row's name-from-content absorb "Delete …" and gave the two
+                controls one activation surface (WCAG 4.1.2, twice). Selected
+                state travels via aria-pressed on the open control. */}
+            <button
+              type="button"
+              className="cl-row-open"
+              aria-pressed={effectiveSelected === c.id}
+              onClick={() => openConversation(c.id)}
+            >
               <span className="cl-row-title">{c.title}</span>
               <span className="cl-row-time">{relTime(c.updatedAt)}</span>
-            </span>
+            </button>
             <button
               type="button"
               className="cl-del"
               aria-label={`Delete ${c.title}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                void remove(c.id);
-              }}
+              onClick={() => void remove(c.id)}
             >
               ×
             </button>
