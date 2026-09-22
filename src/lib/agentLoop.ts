@@ -513,12 +513,25 @@ const dropImages = (m: ChatMessage): ChatMessage => dropBlocks(m, 'image');
 /** Compaction's reasoning-drop rule (R3-335). */
 const dropReasoning = (m: ChatMessage): ChatMessage => dropBlocks(m, 'reasoning');
 
+/**
+ * The host's typed code for "the conversation no longer fits" — produced by site-main's
+ * `PROVIDER_ERROR_CODES` vocabulary (`src/editor/llm/providerErrors.ts`): the host maps
+ * BOTH a provider's own context overflow AND the relay's bound refusal to this one code.
+ * The SDK does not export that vocabulary, so the literal needs exactly one home HERE,
+ * pointed at its producer.
+ */
+export const HOST_CONTEXT_OVERFLOW_CODE = 'context-too-large';
+
 /** Does this thrown error look like a hard context-window overflow? Used to trigger
  *  recover-then-retry compaction (F3/exit-c) rather than a dead loop. */
 export function isContextOverflow(e: unknown): boolean {
   const msg = ((e as Error)?.message ?? String(e)).toLowerCase();
   const code = String((e as { code?: unknown })?.code ?? '').toLowerCase();
   return (
+    // The host's own typed code, matched EXACTLY: the host is the one place that
+    // decides what counts as an overflow (R3-588) — a relay `too-large` it did NOT
+    // translate must not sneak in as a substring of some message.
+    code === HOST_CONTEXT_OVERFLOW_CODE ||
     code.includes('context_length') ||
     code.includes('context-length') ||
     /context (?:length|window)|maximum context|too many tokens|prompt is too long|reduce the length/.test(msg)

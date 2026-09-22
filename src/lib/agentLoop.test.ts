@@ -7,6 +7,7 @@ import {
   shouldCompact,
   compactTranscript,
   isContextOverflow,
+  HOST_CONTEXT_OVERFLOW_CODE,
   COMPACTION_MARKER,
   type ChatMessage,
   type ModelClient,
@@ -476,6 +477,51 @@ describe('runAgent — the agentic tool-use loop (§3.3)', () => {
       });
       expect(isContextOverflow(new Error('maximum context length exceeded'))).toBe(true);
       // It recovered: the run ends with the post-recovery assistant turn, not a throw.
+      const last = transcript[transcript.length - 1];
+      expect(last.content.some((b) => b.type === 'text' && b.text === 'recovered.')).toBe(true);
+    });
+
+    // R3-588 — the host's OWN typed code must trigger the same recover-then-retry a
+    // provider-style overflow gets, and an untranslated relay refusal must NOT: the
+    // host is the one place that decides what counts as an overflow.
+    it('(r3-588) recognises the host-typed context-too-large code exactly', () => {
+      expect(isContextOverflow(Object.assign(new Error('This conversation is too long for the model.'), { code: HOST_CONTEXT_OVERFLOW_CODE }))).toBe(true);
+      expect(isContextOverflow(Object.assign(new Error('request body 68214 bytes exceeds the 65536-byte cap'), { code: 'too-large' }))).toBe(false);
+      // Exact match, not a substring: a code that merely CONTAINS the words is not the host's.
+      expect(isContextOverflow(Object.assign(new Error('…'), { code: 'host-context-too-large-ish' }))).toBe(false);
+    });
+
+    it('(r3-588) a host-typed context-too-large rejection triggers recover-then-retry, not a dead loop', async () => {
+      let threw = false;
+      const client = {
+        calls: 0,
+        async createMessage(req: { tools: AgentTool[] }): Promise<ModelResponse> {
+          this.calls++;
+          if (req.tools.length === 0) return { stopReason: 'end_turn', content: [{ type: 'text', text: 'summary' }] };
+          if (!threw) {
+            threw = true;
+            // The host's typed code (site-main's PROVIDER_ERROR_CODES) instead of the
+            // provider-style message the case above uses — same recovery must run.
+            throw Object.assign(new Error('This conversation is too long for the model. Start a fresh one, or shorten it.'), { code: HOST_CONTEXT_OVERFLOW_CODE });
+          }
+          return { stopReason: 'end_turn', content: [{ type: 'text', text: 'recovered.' }] };
+        },
+      };
+      const history: ChatMessage[] = [
+        { role: 'user', content: [{ type: 'text', text: 'earlier task /src/a.ts' }] },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'h', name: 'read_file', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'h', content: 'x' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      ];
+      const transcript = await runAgent({
+        client,
+        tools: TOOLS,
+        execute: async () => ({ content: 'ok' }),
+        history,
+        prompt: 'continue',
+        contextWindow: 1000,
+        keepRecentTurns: 2,
+      });
       const last = transcript[transcript.length - 1];
       expect(last.content.some((b) => b.type === 'text' && b.text === 'recovered.')).toBe(true);
     });
