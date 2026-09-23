@@ -438,6 +438,31 @@ describe('conversationStore — fold coherence (R3-695 / R-ARD-9)', () => {
     // Interleaved batch with one dangling pair: back to the coherent base.
     expect(coherentFoldSeq([e(8, 'B2', 'a'), e(9, 'B2', 'b'), e(10, 'B3', 'b')], 7)).toBe(7);
   });
+
+  it('the batch-closing predicate is ONE model: a hand-crafted mid-batch B4 folds and replays identically (review round 1, R6)', async () => {
+    // A hostile journal the producer cannot emit (B4 fires only after the batch
+    // loop). Before the alignment, coherentFoldSeq closed the batch at the B4
+    // while replayFrom did not, so a fold at the B4 split the results message
+    // across the boundary — the exact provider-invalid split this rule exists
+    // to prevent, reachable only by the two spellings disagreeing.
+    const fs = new MemFs();
+    const s = twoTier(fs);
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    await s.append(conv.id, b('B1', { blocks: [toolUse('tu1'), toolUse('tu2')] }));
+    await s.append(conv.id, b('B2', { effectId: 'e1', call: toolUse('tu1') }));
+    await s.append(conv.id, b('B3', { effectId: 'e1', result: toolResult('tu1') }));
+    await s.append(conv.id, b('B4', { runState: { spentTokens: 1, contextTokens: 1, nudges: 0, truncationRetries: 0 } }));
+    await s.append(conv.id, b('B3', { effectId: 'e2', result: toolResult('tu2') }));
+    const before = await s.replay(conv.id);
+    const folded = await s.fold(conv.id);
+    // The boundary is at the B4 (both models close the batch there)…
+    expect(folded.foldedSeq).toBe(5);
+    // …and replay across the fold is byte-identical — the fold at the B4 and a
+    // full replay assemble the SAME transcript, never two spellings of it.
+    const after = await s.replay(conv.id);
+    expect(JSON.stringify(after.messages)).toBe(JSON.stringify(before.messages));
+  });
 });
 
 describe('conversationStore — a store fault at B2 (G-ARD-14)', () => {

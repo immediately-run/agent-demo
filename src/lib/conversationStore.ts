@@ -733,6 +733,13 @@ export function createConversationStore(opts: {
           break;
         }
         case 'B4':
+          // R3-695: B4 closes the batch, exactly as coherentFoldSeq's model does —
+          // "any non-B3 boundary closes it" was this case's own comment, and two
+          // spellings of the closing predicate can disagree (on a hand-crafted
+          // mid-batch B4) precisely far enough to split a results message across a
+          // fold boundary. Producer sequences never emit B4 mid-batch (it fires at
+          // run end, after the batch loop), so this only aligns the two models.
+          closeBatch();
           runState = e.runState ?? runState;
           runEnded = e.runEnd === true;
           break;
@@ -892,7 +899,7 @@ export function createConversationStore(opts: {
     // CLAMPED forward: appends that landed while the (synced-tier) record save
     // was in flight are already above the snapshot — never move the cache back.
     bumpSeq(id, replayed.lastSeq);
-    await reclaimThrough(id, watermark); // R-ARD-5c: the fold supersedes — through the COHERENT boundary only
+    await reclaimThrough(id, watermark); // R-ARD-5c: the fold supersedes — through the watermark (the coherent boundary for a patch-less fold; the raw head for a carrying fold)
     return saved;
   };
 
