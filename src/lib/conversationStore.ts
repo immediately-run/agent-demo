@@ -281,6 +281,41 @@ function boundEntryPayload(b: LoopBoundary): LoopBoundary {
 
 const errWithCode = (code: string, msg: string): Error => Object.assign(new Error(msg), { code });
 
+/**
+ * R3-695 (R-ARD-9, the coherence rule): the highest seq at/below the journal
+ * head at which the journal is at a COHERENT boundary — no B-block is open
+ * (every B2 at/below it has its resolving B3 at/below it) and no B3 batch is
+ * mid-assembly (R-ARD-7a: one batch shares ONE results message; folding inside
+ * it would split that message across the record and the journal, and the replay
+ * would render two consecutive `user` turns — provider-invalid). Pure, over the
+ * entries above `fromSeq` (the record's own watermark is taken as coherent: it
+ * was stamped by a fold that obeyed this rule, or is the initial 0). An
+ * automatic fold stamps THIS seq, never the raw head, so an in-flight tool
+ * call's B2 mark can never be folded-and-reclaimed away — reclaiming it is
+ * what makes R-ARD-11's replay label a started call "not executed" (the
+ * duplicate-effect hole).
+ */
+export function coherentFoldSeq(entries: JournalEntry[], fromSeq: number): number {
+  let watermark = fromSeq;
+  const dangling = new Set<string>();
+  let batchOpen = false;
+  for (const e of entries) {
+    if (e.seq <= fromSeq) continue;
+    if (e.kind === 'B2') {
+      // B2 neither opens nor closes the batch (R-ARD-7a: the loop interleaves
+      // B2,B3,B2,B3 within one batch).
+      if (e.effectId !== undefined) dangling.add(e.effectId);
+    } else if (e.kind === 'B3') {
+      if (e.effectId !== undefined) dangling.delete(e.effectId);
+      batchOpen = true; // B3s accumulate into one shared results message
+    } else {
+      batchOpen = false; // every non-B2/B3 entry closes the batch
+    }
+    if (dangling.size === 0 && !batchOpen) watermark = e.seq;
+  }
+  return watermark;
+}
+
 /** R3-560: did this thrown value come from the journal's fail-closed refusals
  *  (corrupt / unknown schema / incoherent seq / timeout / unavailability)?
  *  The ONE predicate — callers never re-type the `journal-` prefix dance. The
@@ -698,6 +733,13 @@ export function createConversationStore(opts: {
           break;
         }
         case 'B4':
+          // R3-695: B4 closes the batch, exactly as coherentFoldSeq's model does —
+          // "any non-B3 boundary closes it" was this case's own comment, and two
+          // spellings of the closing predicate can disagree (on a hand-crafted
+          // mid-batch B4) precisely far enough to split a results message across a
+          // fold boundary. Producer sequences never emit B4 mid-batch (it fires at
+          // run end, after the batch loop), so this only aligns the two models.
+          closeBatch();
           runState = e.runState ?? runState;
           runEnded = e.runEnd === true;
           break;
@@ -820,12 +862,36 @@ export function createConversationStore(opts: {
       next = { ...conv, ...(patch?.messages !== undefined ? { messages: patch.messages } : {}), ...(patch?.title !== undefined ? { title: patch.title } : {}), ...(patch?.repo !== undefined ? { repo: patch.repo } : {}) };
       return save(next);
     }
-    const replayed = await replay(id);
+    const entries = await readEntries(id);
+    const replayed = replayFrom(conv, entries);
+    // R3-695 (R-ARD-9/5c, the coherence rule): an AUTOMATIC fold's boundary may
+    // never fall inside a B-block. If the journal head is an open block — a B2
+    // whose B3 has not landed — folding at the head would stamp the watermark
+    // over the B2 and reclaim it, erasing the started-call mark; R-ARD-11's
+    // replay would then label a STARTED tool call "not executed" and a resume
+    // would re-run it (duplicate non-idempotent effects — the fabricated-
+    // observation class rev 2 exists to prevent). So a patch-less fold defers
+    // to the highest COHERENT boundary — every B2 at/below it has its B3 — and
+    // the open block's entries survive above the watermark for the next fold.
+    // A fold that CARRIES a transcript (`patch.messages`) is the other case:
+    // the caller (run end, keep-and-end-the-run) is making the authoritative,
+    // repaired statement of the run — the patch already encodes the open block
+    // (repairTranscript marks a dangling call started/outcome-unknown) — so it
+    // covers everything, including an open block, and reclaims it.
+    const watermark = patch?.messages !== undefined
+      ? replayed.lastSeq
+      : coherentFoldSeq(entries, replayed.foldedSeq);
+    // The record is the assembly AS OF the watermark (its own closeBatch), not
+    // of the head: entries above the watermark survive and re-apply on replay,
+    // so including them here too would duplicate them.
+    const atWatermark = watermark === replayed.lastSeq
+      ? replayed
+      : replayFrom(conv, entries.filter((e) => e.seq <= watermark));
     next = {
       ...conv,
-      messages: patch?.messages ?? replayed.messages,
-      runState: replayed.runState ?? conv.runState,
-      foldedSeq: replayed.lastSeq,
+      messages: patch?.messages ?? atWatermark.messages,
+      runState: atWatermark.runState ?? conv.runState,
+      foldedSeq: watermark,
       ...(patch?.title !== undefined ? { title: patch.title } : {}),
       ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
     };
@@ -833,7 +899,7 @@ export function createConversationStore(opts: {
     // CLAMPED forward: appends that landed while the (synced-tier) record save
     // was in flight are already above the snapshot — never move the cache back.
     bumpSeq(id, replayed.lastSeq);
-    await reclaimThrough(id, replayed.lastSeq); // R-ARD-5c: the fold supersedes
+    await reclaimThrough(id, watermark); // R-ARD-5c: the fold supersedes — through the watermark (the coherent boundary for a patch-less fold; the raw head for a carrying fold)
     return saved;
   };
 
