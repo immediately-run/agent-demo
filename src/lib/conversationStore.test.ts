@@ -4,7 +4,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // doesn't load the full SDK (these tests use the fs-injected core, not openSettings).
 vi.mock('@immediately-run/sdk', () => ({ openSettings: vi.fn() }));
 
-import { createConversationStore, deriveTitle } from './conversationStore';
+import { createConversationStore, coherentFoldSeq, deriveTitle } from './conversationStore';
 import { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, parseLease } from './lease';
 import { MemFs } from './testing/memStoreFs';
 import type { Conversation } from './conversationModel';
@@ -335,6 +335,108 @@ describe('conversationStore — fold (R-ARD-9 / R-ARD-5c)', () => {
     await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
     await s.remove(conv.id);
     expect([...fs.files.keys()].some((p) => p.includes(conv.id))).toBe(false);
+  });
+});
+
+describe('conversationStore — fold coherence (R3-695 / R-ARD-9)', () => {
+  const toolUse = (id: string, name = 'write_file') =>
+    ({ type: 'tool_use', id, name, input: {} }) as LoopBoundary extends never ? never : import('./agentLoop').ToolUseBlock;
+  const toolResult = (id: string, content = 'ok') =>
+    ({ type: 'tool_result', tool_use_id: id, content }) as import('./agentLoop').ToolResultBlock;
+
+  it('an automatic fold with a dangling B2 head defers the boundary: the B2 survives reclaim and a started call still replays as started (R-ARD-11)', async () => {
+    const fs = new MemFs();
+    const s = twoTier(fs);
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    await s.append(conv.id, b('B1', { blocks: [{ type: 'text', text: 'calling…' }] }));
+    // The R3-695 hole, verbatim: the head is a B2 whose executor is in flight.
+    await s.append(conv.id, b('B2', { effectId: 'e1', call: toolUse('tu1') }));
+    const before = await s.replay(conv.id);
+    expect(before.pendingEffects.map((p) => p.effectId)).toEqual(['e1']);
+
+    const folded = await s.fold(conv.id); // patch-LESS: the automatic fold
+    // The boundary deferred to the coherent point (the B1), NOT the raw head…
+    expect(folded.foldedSeq).toBe(2);
+    // …so the started-call mark is NOT folded-and-reclaimed away…
+    expect(entryFiles(fs, conv.id).map(([, e]) => e.kind)).toEqual(['B2']);
+    // …and a replay after fold+reclaim still reports the call as STARTED —
+    // R-ARD-11's replay labels it started/outcome-unknown, never "not executed".
+    const after = await s.replay(conv.id);
+    expect(after.pendingEffects.map((p) => p.effectId)).toEqual(['e1']);
+    expect(JSON.stringify(after.messages)).toBe(JSON.stringify(before.messages));
+  });
+
+  it('once the resolving B3 lands, the next fold covers the block and reclaims it', async () => {
+    const fs = new MemFs();
+    const s = twoTier(fs);
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    await s.append(conv.id, b('B1', { blocks: [toolUse('tu1')] }));
+    await s.append(conv.id, b('B2', { effectId: 'e1', call: toolUse('tu1') }));
+    await s.fold(conv.id); // defers — B2 survives
+    await s.append(conv.id, b('B3', { effectId: 'e1', result: toolResult('tu1') }));
+    // A batch-closing entry arrives so the boundary is coherent past the batch.
+    await s.append(conv.id, b('B4', { runState: { spentTokens: 1, contextTokens: 1, nudges: 0, truncationRetries: 0 } }));
+    const before = await s.replay(conv.id);
+    const folded = await s.fold(conv.id);
+    expect(folded.foldedSeq).toBe(5);
+    expect(entryFiles(fs, conv.id)).toHaveLength(0);
+    const after = await s.replay(conv.id);
+    expect(JSON.stringify(after.messages)).toBe(JSON.stringify(before.messages));
+    expect(after.pendingEffects).toEqual([]);
+  });
+
+  it('a fold never splits an assembling B3 batch: the boundary waits for the batch to close (R-ARD-7a)', async () => {
+    const fs = new MemFs();
+    const s = twoTier(fs);
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    await s.append(conv.id, b('B1', { blocks: [toolUse('tu1'), toolUse('tu2')] }));
+    await s.append(conv.id, b('B2', { effectId: 'e1', call: toolUse('tu1') }));
+    await s.append(conv.id, b('B3', { effectId: 'e1', result: toolResult('tu1') }));
+    // e1 closed, but the results BATCH is open — the next non-B2/B3 entry closes it.
+    await s.append(conv.id, b('B2', { effectId: 'e2', call: toolUse('tu2') }));
+    const before = await s.replay(conv.id);
+    const folded = await s.fold(conv.id);
+    // Boundary at the B1: neither the dangling e2 block nor the open batch.
+    expect(folded.foldedSeq).toBe(2);
+    // Replay across the fold is byte-identical: the batch re-assembles as ONE
+    // results message from the surviving entries, never two user turns.
+    const after = await s.replay(conv.id);
+    expect(JSON.stringify(after.messages)).toBe(JSON.stringify(before.messages));
+    expect(after.messages.filter((m) => m.role === 'user')).toHaveLength(2); // kickoff + the one results message
+  });
+
+  it('a fold that CARRIES the repaired transcript covers an open block — the keep-and-end-the-run shape (§5.3)', async () => {
+    const fs = new MemFs();
+    const s = twoTier(fs);
+    const conv = await s.create();
+    await s.append(conv.id, b('B0', { messages: [userMsg('go')] }));
+    await s.append(conv.id, b('B2', { effectId: 'e1', call: toolUse('tu1') }));
+    // keepAndClose folds repairTranscript's output — the authoritative,
+    // repaired statement of the run (started/outcome-unknown in the transcript).
+    const repaired = [userMsg('go'), { role: 'user', content: [{ type: 'text', text: '(a tool call was started; its outcome is unknown)' }] }] as import('./agentLoop').ChatMessage[];
+    const folded = await s.fold(conv.id, { messages: repaired });
+    expect(folded.foldedSeq).toBe(2);
+    expect(entryFiles(fs, conv.id)).toHaveLength(0); // the patch covers the open block, by design
+    expect((await s.load(conv.id))?.messages).toEqual(repaired);
+    const after = await s.replay(conv.id);
+    expect(after.journalDepth).toBe(0); // nothing left above the fold to re-report
+    expect(JSON.stringify(after.messages)).toBe(JSON.stringify(repaired));
+  });
+
+  it('coherentFoldSeq (pure): the boundary is where nothing is open — never inside a block, never inside a batch', () => {
+    const e = (seq: number, kind: import('./agentLoop').LoopBoundary['kind'], effectId?: string): JournalEntry =>
+      ({ seq, kind, schema: 1, t: 1, ...(effectId !== undefined ? { effectId } : {}) }) as JournalEntry;
+    // Nothing above the fold: the watermark stays at the record's.
+    expect(coherentFoldSeq([], 7)).toBe(7);
+    // B2 dangles through the head: no advance.
+    expect(coherentFoldSeq([e(8, 'B2', 'a'), e(9, 'B2', 'b')], 7)).toBe(7);
+    // Resolved blocks advance the boundary only once the BATCH closes (the B4).
+    expect(coherentFoldSeq([e(8, 'B2', 'a'), e(9, 'B3', 'a'), e(10, 'B4')], 7)).toBe(10);
+    // Interleaved batch with one dangling pair: back to the coherent base.
+    expect(coherentFoldSeq([e(8, 'B2', 'a'), e(9, 'B2', 'b'), e(10, 'B3', 'b')], 7)).toBe(7);
   });
 });
 

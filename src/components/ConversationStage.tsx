@@ -39,6 +39,7 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
+import ResumeAffordance from "./ResumeAffordance";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
@@ -938,25 +939,15 @@ export default function ConversationStage() {
         </ul>
       )}
 
-      {/* R3-560 — the attended-resume affordance (R-ARD-15). Renders the work
-          artifact, never a question the user cannot answer; the two offered
-          choices are explicit about scope, and the file changes staying is said
-          plainly. The third spec'd choice (discard + revert the run's writes) is
-          not offered — see the comment above `resumeRun`. */}
+      {/* R3-560 — the attended-resume affordance (R-ARD-15), extracted (R3-695)
+          so the two-choice shape is pinned by its own test. See
+          ResumeAffordance.tsx and the comment above `resumeRun`. */}
       {pendingResume && !running && (
-        <div className="ca-line ca-error" role="status">
-          <span className="ca-err">
-            This run was interrupted after {pendingResume.replay.journalDepth} steps. You can resume it from its last checkpoint — either way, the file changes so far stay.
-          </span>
-          <div className="ca-resume-row">
-            <button type="button" className="ca-run" onClick={() => void resumeRun()}>
-              Resume run
-            </button>
-            <button type="button" className="ca-steer-btn" onClick={() => void keepAndClose()}>
-              Keep the files and end the run
-            </button>
-          </div>
-        </div>
+        <ResumeAffordance
+          journalDepth={pendingResume.replay.journalDepth}
+          onResume={() => void resumeRun()}
+          onKeepAndEnd={() => void keepAndClose()}
+        />
       )}
 
       {/* R3-561 / R-ARD-18a — the lease renders as an OFFER. The copy says "may be",
