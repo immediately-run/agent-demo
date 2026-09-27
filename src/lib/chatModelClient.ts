@@ -68,14 +68,23 @@ const mapStop = (s: string): string => (s === 'tool' ? 'tool_use' : s === 'lengt
 
 /** A {@link ModelClient} over the host `llm.chat` slot. Streams text deltas (forwarded
  *  to `onTextDelta`) and assembles tool calls; the resolved provider + model are the
- *  user's preference, never named here. */
-export function createChatModelClient(): ModelClient {
+ *  user's preference, never named here — EXCEPT the one case LLM_AND_AGENTS_SPEC §0's
+ *  editing-session exception allows (R3-620): a `model` pair the USER chose for this
+ *  conversation, resolved from the record against the connected set by
+ *  `resolveConversationModel` and validated host-side. Absent ⇒ the ordinary
+ *  host-resolved default, unchanged. */
+export function createChatModelClient(model?: { providerId: string; model: string }): ModelClient {
   return {
     async createMessage(req) {
       const chatReq: ChatRequest = {
         messages: toChatMessages(req.system, req.messages),
         ...(req.tools.length ? { tools: toChatTools(req.tools) } : {}),
         modelHint: 'smart',
+        // R3-620 — the per-conversation choice: when present it WINS over the hint
+        // (host-side), naming one of the user's connected providers; the host refuses
+        // it with the typed `provider-not-connected` if the provider has since been
+        // disconnected, which `resolveConversationModel` has already steered away.
+        ...(model ? { model } : {}),
         // R3-224: hand the loop's abort signal to the SDK so the stop button aborts
         // the in-flight upstream request (host stops generating + billing), not just
         // the app-side iterator. `chat()` peels it off before the wire params.

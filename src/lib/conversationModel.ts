@@ -29,6 +29,15 @@ export interface ConversationMeta {
    * a connected workspace.
    */
   repo?: string;
+  /**
+   * R3-620 — the user's per-conversation model choice: a concrete
+   * provider-and-model pair naming one of the user's CONNECTED providers.
+   * Absent means "the Settings default" (what `chat()` with no pair runs); no
+   * existing record is rewritten. The choice is validated at run time against
+   * the connected set (`resolveConversationModel`), so a stale record cannot pin
+   * a conversation to a provider that is gone. Additive-optional (schema stays 1).
+   */
+  model?: { providerId: string; model: string };
 }
 
 /** The full stored record (one JSON file per conversation). */
