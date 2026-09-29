@@ -203,7 +203,7 @@ jobs:
       - name: Build cache zip
         run: |
           for ref in "${{ github.ref_name }}" "${{ github.sha }}"; do
-            npx -y @immediately-run/cli@0.8.2 cache-zip \
+            npx -y @immediately-run/cli@0.9.1 cache-zip \
               --owner "${{ github.repository_owner }}" \
               --repo "${{ github.event.repository.name }}" \
               --ref "$ref" \
