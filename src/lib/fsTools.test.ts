@@ -403,3 +403,105 @@ describe('read_file offset/limit paging (R3-223)', () => {
     expect(collected.join('\n')).toBe(original); // every byte recovered
   });
 });
+
+// R3-856 — tool calls whose intent is clear are not refused. Three failures
+// from one owner session (the movie-night-report build): `edits: []` beside a
+// complete pair, grep's `flags: "n"` read as a RegExp flag, and text written
+// into an image path after a failed fetch.
+describe('edit_file — an empty edits[] carries no intent (R3-856)', () => {
+  it('old_string/new_string with edits: [] applies the single edit', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: '(a:number,b:number)=>a+b',
+      new_string: '(a:number,b:number)=>a + b',
+      edits: [],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('1 replacement');
+    expect(fs.files.get('/app/src/lib/util.ts')).toBe('export const add = (a:number,b:number)=>a + b // TODO refactor\n');
+  });
+
+  it('both forms non-empty is refused with the either-or message', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: '(a:number,b:number)=>a+b',
+      new_string: '(a:number,b:number)=>a + b',
+      edits: [{ old_string: 'TODO refactor', new_string: 'clean up' }],
+    });
+    expect(res).toEqual({ content: 'pass either old_string/new_string or edits, not both', isError: true });
+    // nothing applied — the all-or-nothing rule holds for the refusal too
+    expect(fs.files.get('/app/src/lib/util.ts')).toBe('export const add = (a:number,b:number)=>a+b // TODO refactor\n');
+  });
+
+  it('neither form is still refused', async () => {
+    const res = await ts(seed()).execute('edit_file', { path: 'src/lib/util.ts', edits: [] });
+    expect(res).toEqual({
+      content: 'edit_file requires a non-empty "old_string" (or an "edits" array)',
+      isError: true,
+    });
+  });
+});
+
+describe('grep — flags normalised, not trusted (R3-856)', () => {
+  it('flags: "n" returns hits with the ignored note — the transcript case', async () => {
+    const { content } = await ts(seed()).execute('grep', { pattern: 'TODO', flags: 'n' });
+    const lines = content.split('\n');
+    expect(lines).toHaveLength(3); // two hits + the note
+    expect(lines[0]).toMatch(/^src\/App\.tsx:2: /);
+    expect(lines[2]).toBe('(ignored flags: n — line numbers are always shown)');
+  });
+
+  it('flags: "g" over two consecutive matching lines returns both (stateful re.test regression)', async () => {
+    const fs = new MemFs({
+      '/app/notes.txt': 'alpha match\nalpha match\nalpha match\nuntouched\n',
+    });
+    const { content } = await ts(fs).execute('grep', { pattern: 'match', flags: 'g' });
+    const hitLines = content.split('\n').filter((l) => l.startsWith('notes.txt:'));
+    expect(hitLines).toEqual([
+      'notes.txt:1: alpha match',
+      'notes.txt:2: alpha match',
+      'notes.txt:3: alpha match',
+    ]);
+    expect(content).toContain('(ignored flags: g');
+  });
+
+  it('an invalid pattern still errors, with the note appended when flags were ignored', async () => {
+    const res = await ts(seed()).execute('grep', { pattern: '(unclosed', flags: 'n' });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('invalid regex');
+    expect(res.content).toContain('ignored flags: n');
+  });
+});
+
+describe('write_file — text into an image path is refused (R3-856)', () => {
+  it('a string into src/assets/posters/avatar.jpg is refused, the file untouched', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('write_file', {
+      path: 'src/assets/posters/avatar.jpg',
+      content: 'https://example.com/avatar.jpg',
+    });
+    expect(res).toEqual({
+      content: 'write_file writes text; to add an image, copy an existing asset with copy_file',
+      isError: true,
+    });
+    expect(fs.files.has('/app/src/assets/posters/avatar.jpg')).toBe(false);
+  });
+
+  it('.svg is text and stays writable', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('write_file', { path: 'src/logo.svg', content: '<svg/>' });
+    expect(res.isError).toBeUndefined();
+    expect(fs.files.get('/app/src/logo.svg')).toBe('<svg/>');
+  });
+
+  it('every image extension in the table is refused', async () => {
+    for (const ext of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico']) {
+      const res = await ts(seed()).execute('write_file', { path: `a.${ext}`, content: 'x' });
+      expect(res.isError, `a.${ext}`).toBe(true);
+    }
+    // case-insensitive on the extension
+    expect((await ts(seed()).execute('write_file', { path: 'a.JPG', content: 'x' })).isError).toBe(true);
+  });
+});
