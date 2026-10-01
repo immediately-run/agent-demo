@@ -142,11 +142,13 @@ const IMAGE_CAP = 1_500 * 1024;
  * Image types the transport can carry, mirroring the SDK's `mimeTypeFor` table.
  *
  * WHY A LOCAL COPY rather than importing `mimeTypeFor` from `@immediately-run/sdk`:
- * this module is deliberately dependency-light so it unit-tests without a host — every
- * suite that touches it (and `projectTools`, which shares its types) would otherwise
- * have to mock the whole SDK barrel to exercise a path lookup. Eleven lines of table is
- * the cheaper honesty. `mimeTypeFor` is the source it mirrors; `imageMime.test.ts`
- * pins the agreement.
+ * the SDK's published dist cannot be imported by a bare unit runner at all (its
+ * internal specifiers resolve only under a bundler), and this module is deliberately
+ * dependency-light so it unit-tests without a host. `mimeTypeFor` is the source this
+ * mirrors — BY INSPECTION, not by a test pin: no test can import the other side, so
+ * when the SDK's table changes, this one is re-read by hand. The table is exported
+ * (`BINARY_IMAGE_EXTENSIONS`) and the write_file refusal test derives its cases from
+ * it, so at least the COPY cannot drift from what this module enforces.
  *
  * `.svg` is deliberately ABSENT even though the SDK's table names it — see `read_file`.
  */
@@ -167,6 +169,10 @@ export function imageMimeFor(path: string): string | undefined {
   if (dot === -1) return undefined;
   return IMAGE_MIME_BY_EXT[path.slice(dot + 1).toLowerCase()];
 }
+
+/** Every extension `write_file` refuses text into — derived from the MIME table,
+ *  so the refusal and the transport's image grammar are ONE list (R3-856). */
+export const BINARY_IMAGE_EXTENSIONS: readonly string[] = Object.keys(IMAGE_MIME_BY_EXT);
 const LIST_CAP = 1000; // entries from list_dir
 const MATCH_CAP = 200; // glob paths / grep hits
 const WALK_CAP = 5000; // files visited by a glob/grep walk

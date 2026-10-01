@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
+import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, BINARY_IMAGE_EXTENSIONS, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
 
 // AA-23: the workbench agent must author the STAGE app's conferred working tree
 // (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
@@ -496,8 +496,11 @@ describe('write_file — text into an image path is refused (R3-856)', () => {
     expect(fs.files.get('/app/src/logo.svg')).toBe('<svg/>');
   });
 
-  it('every image extension in the table is refused', async () => {
-    for (const ext of ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico']) {
+  it('every image extension the table names is refused — derived from the producer', async () => {
+    // R2: the cases come from BINARY_IMAGE_EXTENSIONS itself, so an extension
+    // added to the table ships refused WITH coverage, not before it.
+    expect(BINARY_IMAGE_EXTENSIONS.length).toBeGreaterThanOrEqual(8);
+    for (const ext of BINARY_IMAGE_EXTENSIONS) {
       const res = await ts(seed()).execute('write_file', { path: `a.${ext}`, content: 'x' });
       expect(res.isError, `a.${ext}`).toBe(true);
     }

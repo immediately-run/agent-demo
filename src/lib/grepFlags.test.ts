@@ -22,9 +22,19 @@ describe('normalizeGrepFlags', () => {
     expect(normalizeGrepFlags('gi')).toEqual({ flags: 'i', ignored: ['g'] });
   });
 
-  it('ignores letters that are not JS RegExp flags at all', () => {
+  it('ignores letters that are not accepted here — including the valid-elsewhere d and v', () => {
     expect(normalizeGrepFlags('v')).toEqual({ flags: '', ignored: ['v'] });
     expect(normalizeGrepFlags('inx')).toEqual({ flags: 'i', ignored: ['n', 'x'] });
+    expect(ignoredFlagReason('v')).toBe('not accepted here (only i, m, s, u are)');
+  });
+
+  it('uppercase, digits and non-ASCII are ignored AND named, never silently dropped', () => {
+    // round-1 finding: 'I' used to vanish with no note, running case-sensitive
+    // — the exact failure class this item exists to kill.
+    expect(normalizeGrepFlags('I')).toEqual({ flags: '', ignored: ['I'] });
+    expect(normalizeGrepFlags('N2')).toEqual({ flags: '', ignored: ['N', '2'] });
+    expect(normalizeGrepFlags('í')).toEqual({ flags: '', ignored: ['í'] });
+    expect(ignoredFlagsNote(['I'])).toBe(' (ignored flags: I — not accepted here (only i, m, s, u are))');
   });
 
   it('a nullish raw reads as no flags, not a crash', () => {
@@ -44,8 +54,8 @@ describe('ignoredFlagsNote', () => {
     );
   });
 
-  it('unknown letters say they are not JS RegExp flags', () => {
-    expect(ignoredFlagReason('v')).toBe('not a JS RegExp flag');
+  it('unknown letters say they are not accepted here', () => {
+    expect(ignoredFlagReason('v')).toBe('not accepted here (only i, m, s, u are)');
     expect(ignoredFlagReason('n')).toBe('line numbers are always shown');
   });
 });

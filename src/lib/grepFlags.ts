@@ -18,22 +18,29 @@ const IGNORED_REASONS: Record<string, string> = {
   y: 'stateful with re.test here — matches would be skipped',
 };
 
-/** Why one ignored letter is ignored; unknown letters are simply not JS flags. */
+/**
+ * Why one ignored letter is ignored. The fallback is worded to stay TRUE for
+ * every character it can name — d (hasIndices) and v (unicodeSets) ARE valid
+ * JS RegExp flags this runtime accepts, so "not a JS RegExp flag" would teach
+ * the model a falsehood (round-1 finding).
+ */
 export function ignoredFlagReason(letter: string): string {
-  return IGNORED_REASONS[letter] ?? 'not a JS RegExp flag';
+  return IGNORED_REASONS[letter] ?? 'not accepted here (only i, m, s, u are)';
 }
 
 /**
  * Normalise a raw flags string into what `grep` can safely use.
- * Keeps `i` `m` `s` `u` (deduped, first-seen order); everything else is
- * reported in `ignored` for the caller to name in its result.
+ * Keeps `i` `m` `s` `u` (deduped, first-seen order); EVERY other character —
+ * uppercase, digits, anything — is reported in `ignored` for the caller to
+ * name in its result (round-1 finding: `flags:"I"` silently ran
+ * case-sensitive with no note, the exact failure class this item kills).
  */
 export function normalizeGrepFlags(raw: string): { flags: string; ignored: string[] } {
   const kept = new Set<string>();
   const ignored: string[] = [];
   for (const ch of String(raw ?? '')) {
     if (ch === 'i' || ch === 'm' || ch === 's' || ch === 'u') kept.add(ch);
-    else if (IGNORED_REASONS[ch] !== undefined || /[a-z]/.test(ch)) ignored.push(ch);
+    else ignored.push(ch);
   }
   return { flags: [...kept].join(''), ignored: [...new Set(ignored)] };
 }
