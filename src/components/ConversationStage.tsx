@@ -13,6 +13,8 @@ import {
   postToRegion,
   onRegionMessage,
   describeChat,
+  describeChatState,
+  useChatProviderState,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
@@ -22,6 +24,7 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
+import { resolveConversationModel, type HostModelView } from "../lib/resolveConversationModel";
 import { runAgent, type RunState } from "../lib/agentLoop";
 import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
@@ -40,6 +43,7 @@ import type { Conversation } from "../lib/conversationModel";
 import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import ResumeAffordance from "./ResumeAffordance";
+import ModelPicker from "./ModelPicker";
 import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
@@ -100,6 +104,10 @@ export default function ConversationStage() {
   // The conversation currently shown — keys the transcript scroller so a switch resets
   // its follow state (a release in one conversation must not carry into the next).
   const [convId, setConvId] = useState<string | undefined>(undefined);
+  // R3-620 — the shown conversation's stored model choice (mirrored as state so
+  // the picker re-renders on a switch AND on a save, neither of which a ref
+  // alone triggers).
+  const [convModel, setConvModel] = useState<Conversation["model"]>(undefined);
   // Why persistence is unavailable, if it is. The conversation store is not a
   // nice-to-have: `run()` reads the model's HISTORY out of the persisted
   // conversation, so a dead store silently downgrades the agent to a stateless
@@ -161,6 +169,63 @@ export default function ConversationStage() {
   // something that errors upstream. Re-read when the provider changes.
   const vision = useMemo(() => describeChat()?.features.vision === true, []);
 
+  // R3-620 — the host's model view for the per-conversation choice: the Settings
+  // default (what `chat()` with no pair runs — the resolved provider + the tier
+  // model the run's `modelHint: 'smart'` maps to) and the connected ids
+  // (`describeChat()`'s `connectedProviders`, which the host only sends this
+  // frame because it holds the ELEVATED `llm:chooseModel` capability — the
+  // panel and any stage app see it stripped, and the picker stays absent).
+  const providerState = useChatProviderState();
+  const hostModelView = useMemo<HostModelView>(() => {
+    const info = providerState.status === "configured" ? providerState.provider : null;
+    return {
+      default:
+        info?.models !== undefined ? { providerId: info.providerId, model: info.models.smart } : null,
+      connectedProviderIds: info?.connectedProviders?.map((c) => c.providerId) ?? [],
+    };
+  }, [providerState]);
+  // The connected choices for the picker (undefined when this frame holds no
+  // `llm:chooseModel` — the picker then renders nothing).
+  const connectedChoices = useMemo(
+    () =>
+      providerState.status === "configured" ? providerState.provider.connectedProviders : undefined,
+    [providerState],
+  );
+  // Runs read the live state at kickoff, not the render-time memo — a provider
+  // change mid-session must apply to the next run without a remount.
+  const hostModelViewAtRun = useCallback((): HostModelView => {
+    const ps = describeChatState();
+    const info = ps.status === "configured" ? ps.provider : null;
+    return {
+      default:
+        info?.models !== undefined ? { providerId: info.providerId, model: info.models.smart } : null,
+      connectedProviderIds: info?.connectedProviders?.map((c) => c.providerId) ?? [],
+    };
+  }, []);
+  // R3-620 — store the user's per-conversation choice on the RECORD (absent =
+  // the Settings default). The run in flight keeps its own resolved pair; the
+  // choice applies to the next run.
+  const chooseModel = useCallback(
+    async (pair: { providerId: string; model: string } | null) => {
+      const store = storeRef.current;
+      const conv = convRef.current;
+      if (!store || !conv || runningIdRef.current !== null) return;
+      try {
+        convRef.current = await store.save({
+          ...conv,
+          ...(pair ? { model: pair } : { model: undefined }),
+        });
+        setConvModel(pair ?? undefined);
+        setStoreError(null);
+        publisherRef.current?.onSaved();
+        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      } catch (e) {
+        setStoreError(describe(e, NO_STORE_SUFFIX));
+      }
+    },
+    [],
+  );
+
   const { toolset, skills } = useMemo(() => {
     // No conferred stage tree ⇒ a catalog-only toolset with no authoring tools, so
     // `withSkills` offers nothing and `load_skill` is absent — the authoring skills
@@ -219,6 +284,7 @@ export default function ConversationStage() {
     convRef.current = conv;
     setConvId(conv.id);
     setTitle(conv.title);
+    setConvModel(conv.model);
     setLog(messagesToLog(conv.messages));
     setStreaming("");
     publisherRef.current?.onShow();
@@ -494,9 +560,15 @@ export default function ConversationStage() {
     // skills, workspace root) is rebuilt every time and the cache break at the
     // boundary is accepted, not worked around.
     const pinnedPrefix = buildPinnedPrefix({ today: todayIso() });
+    // R3-620 — the per-conversation choice, resolved at kickoff from the record
+    // against the LIVE connected set (a stale record cannot pin a gone provider);
+    // a pair from the record rides the chat request, the default stays host-side.
+    const resolvedModel = resolveConversationModel(convRef.current ?? {}, hostModelViewAtRun());
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(),
+        client: createChatModelClient(
+          resolvedModel.source === "record" ? resolvedModel.model ?? undefined : undefined,
+        ),
         tools: toolset.tools,
         execute: toolset.execute,
         system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
@@ -715,9 +787,14 @@ export default function ConversationStage() {
     // frozen date survives midnight); the LIVE suffix is rebuilt from the
     // current catalog — a revoked tool is absent, honestly taking the cache miss.
     const pinnedPrefix = replay.systemPrefix ?? buildPinnedPrefix({ today: todayIso() });
+    // R3-620 — the same resolution as a fresh run: a resumed conversation keeps
+    // its chosen model, or falls back to the default when that provider is gone.
+    const resolvedModel = resolveConversationModel(convRef.current ?? {}, hostModelViewAtRun());
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(),
+        client: createChatModelClient(
+          resolvedModel.source === "record" ? resolvedModel.model ?? undefined : undefined,
+        ),
         tools: toolset.tools,
         execute: toolset.execute,
         system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
@@ -858,6 +935,15 @@ export default function ConversationStage() {
     <div className="ca ca--stage">
       <header className="ca-hd">
         <span className="ca-title">{title || "Conversation"}</span>
+        {/* R3-620 — the per-conversation model choice. Renders nothing unless the
+            host sent the chooseable set (this frame holds llm:chooseModel); the
+            panel and any stage app see it stripped. */}
+        <ModelPicker
+          stored={convModel}
+          host={hostModelView}
+          connected={connectedChoices}
+          onChoose={(pair) => void chooseModel(pair)}
+        />
         <span className="ca-sub">
           {toolset.tools.length} tools {stageTree ? "(catalog + files)" : "(catalog only)"}
           {usage && (

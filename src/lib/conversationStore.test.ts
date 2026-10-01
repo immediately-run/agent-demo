@@ -25,6 +25,20 @@ describe('conversationStore — durable file-per-conversation store (Phase 01)',
     expect(back?.messages).toEqual([]);
   });
 
+  it('a saved per-conversation model choice round-trips — it shows after a remount (R3-620)', async () => {
+    // The choice belongs to the record, so the store's whole-record save/load
+    // carries it: after the region remounts, the picker re-reads it. A cleared
+    // choice (model: undefined) persists as absent, never as a stale pair.
+    const s = store(new MemFs());
+    const made = await s.create();
+    const pair = { providerId: 'llm.chat.anthropic', model: 'claude-x' };
+    await s.save({ ...made, model: pair });
+    expect((await s.load(made.id))?.model).toEqual(pair);
+    const cleared = await s.load(made.id);
+    await s.save({ ...cleared!, model: undefined });
+    expect((await s.load(made.id))?.model).toBeUndefined();
+  });
+
   it('list returns newest-first and skips a corrupt file', async () => {
     const fs = new MemFs();
     const s = store(fs);
