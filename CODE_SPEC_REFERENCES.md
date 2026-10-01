@@ -27,8 +27,8 @@ re-gates at use. There is **no hand-rolled tool that shells around the SDK** —
 verified 2026-06. `CodingAgent.tsx` / `ConversationStage.tsx` instantiate the
 merged toolset.
 
-*2026-10-01 (R3-859 + R3-860):* every host catalog method now advertises a
-`paramsSchema` (site-main #661 + #663), so `catalogToTools`'s
+*2026-10-01 (R3-859 + R3-860; lands with site-main #663):* once every host catalog method advertises a
+`paramsSchema`, `catalogToTools`'s
 `PERMISSIVE_INPUT_SCHEMA` fallback (`src/lib/agentTools.ts`) is unreachable
 against the first-party host. Left in place deliberately: against a
 THIRD-party host (an older or non-immediately.run catalog) the fallback is
