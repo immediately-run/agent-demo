@@ -293,7 +293,13 @@ export default function ConversationStage() {
   // conversation lands under "Other repositories" — which is the R3-475 bug, just
   // arrived by a different route. `stageTree` stays what it is actually for: the
   // filesystem root the agent authors.
-  const workspaceRepo = useWorkspace()?.label;
+  const workspace = useWorkspace();
+  const workspaceRepo = workspace?.label;
+  // The stamp's PROVIDER half (R3-848): the label alone cannot say which
+  // provider the repo lives under, and the other-repositories row that opens a
+  // repo passes coordinates, never a guess. Stamped beside the label at every
+  // site the label is stamped.
+  const workspaceProvider = workspace?.provider;
 
   // Readable from the boot effect below without re-running it when the workspace
   // arrives (the effect opens the store ONCE; the fallback simply uses whatever repo
@@ -425,7 +431,7 @@ export default function ConversationStage() {
     let conv = convRef.current;
     if (!conv && store) {
       try {
-        conv = await store.create(undefined, workspaceRepo);
+        conv = await store.create(undefined, workspaceRepo, workspaceProvider);
         convRef.current = conv;
         stageSelectionRef.current!.adopt(conv);
         setTitle(conv.title);
@@ -589,6 +595,7 @@ export default function ConversationStage() {
             messages: transcript,
             title: newTitle,
             repo: conv.repo ?? workspaceRepo,
+            ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
           });
           setTitle(newTitle);
           setStoreError(null);
@@ -774,6 +781,7 @@ export default function ConversationStage() {
         convRef.current = await store.fold(conv.id, {
           messages: transcript,
           repo: conv.repo ?? workspaceRepo,
+          ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
         });
         setStoreError(null);
         publisherRef.current?.onSaved();
@@ -832,6 +840,7 @@ export default function ConversationStage() {
       convRef.current = await store.fold(conv.id, {
         messages: repaired.messages,
         repo: conv.repo ?? workspaceRepo,
+        ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
       });
       setLog(messagesToLog(repaired.messages));
       setStoreError(null);

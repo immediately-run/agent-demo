@@ -928,3 +928,35 @@ describe('conversationStore — the advisory run lease (R3-561 / R-ARD-18)', () 
     await expect(s.releaseRun(conv.id)).resolves.toBeUndefined();
   });
 });
+
+// ── R3-848 — the provider stamp survives both fold branches ──────────────────
+// Round 1's blocking finding: the JOURNALED branch (the production two-tier
+// path — a journalRoot is wired whenever the device-local mount answers)
+// dropped `patch.repoProvider`, silently losing the stamp on every save.
+describe('conversationStore — the repoProvider stamp (R3-848)', () => {
+  it('a journaled fold persists the provider stamp and it reads back on a fresh list', async () => {
+    const fs = new MemFs();
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 't' });
+    const conv = await s.create('a', 'other/repo');
+    await s.fold(conv.id, { repo: 'other/repo', repoProvider: 'github' });
+    const re = await createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 't2' });
+    const metas = await re.list();
+    expect(metas[0]?.repo).toBe('other/repo');
+    expect(metas[0]?.repoProvider).toBe('github');
+  });
+  it('a journalless fold persists the provider stamp too', async () => {
+    const s = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 't' });
+    const conv = await s.create('a', 'other/repo');
+    await s.fold(conv.id, { repo: 'other/repo', repoProvider: 'github' });
+    const metas = await s.list();
+    expect(metas[0]?.repoProvider).toBe('github');
+  });
+  it('a fold without a provider patch leaves the record untouched (additive-optional)', async () => {
+    const fs = new MemFs();
+    const s = createConversationStore({ recordRoot: '/settings', journalRoot: '/local', fs, tabId: 't' });
+    const conv = await s.create('a', 'other/repo');
+    await s.fold(conv.id, {});
+    const metas = await s.list();
+    expect(metas[0]?.repoProvider).toBeUndefined();
+  });
+});
