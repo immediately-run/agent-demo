@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { postToRegion, onRegionMessage, revealRegion, useWorkspace, openRepository } from "@immediately-run/sdk";
 import { openConversationStore, metaOf, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
-import { scopeConversations, type RepoGroup } from "../lib/conversationScope";
+import { scopeConversations, repoCoordinatesOf, type RepoGroup } from "../lib/conversationScope";
 import { applyConversationUpdate } from "../lib/conversationUpdate";
 import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
@@ -210,23 +210,29 @@ export default function ConversationList() {
   // before it, so the host still sees the click's transient activation (a
   // deferred call is refused `no-activation`). The app names COORDINATES and
   // nothing else: no URL, no route prefix — the host builds the destination.
-  // A refusal lands its code on the row.
+  // A group that cannot name its coordinates (a legacy record with no provider
+  // stamp, a label that is not a namespace/repository pair) is REFUSED on the
+  // row — never opened under a guessed provider (the round-1 review: the SDK's
+  // workspace can carry a `local` provider; the guess is the thing the item
+  // said not to do).
   const openRepoRow = (g: RepoGroup) => {
-    const at = g.repo.indexOf("/");
-    if (at <= 0) {
-      setOpenError({ repo: g.repo, code: "invalid" });
+    const coords = repoCoordinatesOf(g);
+    if (!coords) {
+      setOpenError({
+        repo: g.repo,
+        code: g.provider === undefined ? "no provider stamp (a legacy conversation)" : "invalid",
+      });
       return;
     }
-    void openRepository({
-      provider: g.provider ?? "github",
-      namespace: g.repo.slice(0, at),
-      repository: g.repo.slice(at + 1),
-    }).catch((e: { code?: string } | null) => {
-      // The legacy-record default: `provider` is stamped beside `repo` only
-      // since R3-848, and github is the only provider the platform has ever
-      // stamped — a record with no provider stamp predates it.
-      setOpenError({ repo: g.repo, code: e?.code ?? "unknown" });
-    });
+    void openRepository(coords)
+      .then(() => {
+        // A success clears the row's earlier refusal, if any — a refusal that
+        // no longer holds must not stay on the row.
+        setOpenError((prev) => (prev?.repo === g.repo ? null : prev));
+      })
+      .catch((e: { code?: string } | null) => {
+        setOpenError({ repo: g.repo, code: e?.code ?? "unknown" });
+      });
   };
 
   const remove = async (id: string) => {

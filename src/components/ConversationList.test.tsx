@@ -273,7 +273,9 @@ describe("ConversationList — other-repositories rows open the repository (R3-8
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("forbidden"));
   });
 
-  it("a legacy group (no provider stamp) opens under the platform's only provider to date", async () => {
+  it("a legacy group (no provider stamp) is REFUSED on the row, never opened under a guessed provider", async () => {
+    // Round-1 review: the SDK's workspace can carry a `local` provider, so a
+    // github default is the guess the item said not to make. The row refuses.
     storeHolder.make = () => makeSeededStore(async (s) => {
       await s.create("mine", "owner/current");
       await s.create("legacy", "old/repo"); // stamped before R3-848: no provider
@@ -282,10 +284,22 @@ describe("ConversationList — other-repositories rows open the repository (R3-8
     await waitFor(() => expect(screen.getByText("old/repo")).toBeTruthy());
     fireEvent.click(screen.getByText("Other repositories"));
     fireEvent.click(screen.getByRole("button", { name: /old\/repo/ }));
-    expect(openRepository).toHaveBeenCalledWith({
-      provider: "github",
-      namespace: "old",
-      repository: "repo",
-    });
+    expect(openRepository).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain("no provider stamp"),
+    );
+  });
+
+  it("a successful open clears the row's earlier refusal", async () => {
+    await renderWithOthers();
+    const row = screen.getByRole("button", { name: /other\/repo/ });
+    vi.mocked(openRepository).mockRejectedValueOnce(
+      Object.assign(new Error("repository open refused"), { code: "forbidden" }),
+    );
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("forbidden"));
+    vi.mocked(openRepository).mockResolvedValueOnce(undefined as never);
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });

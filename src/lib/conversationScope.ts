@@ -11,10 +11,12 @@ export interface RepoGroup {
   count: number;
   /** Newest member's `updatedAt` — drives the group ordering. */
   updatedAt: number;
-  /** The newest member's `repoProvider` stamp (R3-848): the provider the repo
-   *  lived under when it was stamped, so the row that opens it passes it to
-   *  `openRepository()` rather than guessing. `undefined` when every member is
-   *  a legacy record that predates the provider stamp. */
+  /** The group's `repoProvider` stamp (R3-848): the provider the repo lived
+   *  under when it was stamped, so the row that opens it passes it to
+   *  `openRepository()` rather than guessing. Any member's stamp wins — a
+   *  later merge prefers a defined stamp over an undefined one, so a legacy
+   *  creator never pins a stamped joiner to "no provider". `undefined` when
+   *  every member is a legacy record that predates the provider stamp. */
   provider?: string;
 }
 
@@ -47,9 +49,31 @@ export function scopeConversations(
     if (g) {
       g.count += 1;
       g.updatedAt = Math.max(g.updatedAt, c.updatedAt);
+      if (g.provider === undefined && c.repoProvider !== undefined) g.provider = c.repoProvider;
     } else {
       byRepo.set(c.repo, { repo: c.repo, count: 1, updatedAt: c.updatedAt, ...(c.repoProvider ? { provider: c.repoProvider } : {}) });
     }
   }
   return { mine, others: [...byRepo.values()].sort((a, b) => b.updatedAt - a.updatedAt) };
+}
+
+/**
+ * The `openRepository()` coordinates of one "other repository" group (R3-848):
+ * the group's repo label is `namespace/repository` — split at its FIRST `/` —
+ * and the provider is the group's stamp, never guessed. Returns `null` when
+ * the group cannot name coordinates: a label with no `/` (or a leading one) is
+ * not a namespace/repository pair, and a group with no provider stamp is a
+ * legacy record that predates it — both are the row's refusal business, never
+ * a default.
+ */
+export function repoCoordinatesOf(g: RepoGroup): {
+  provider: string;
+  namespace: string;
+  repository: string;
+} | null {
+  const at = g.repo.indexOf('/');
+  if (at <= 0) return null; // no separator, or a leading one: no namespace
+  if (g.repo.length === at + 1) return null; // "a/": no repository
+  if (g.provider === undefined) return null;
+  return { provider: g.provider, namespace: g.repo.slice(0, at), repository: g.repo.slice(at + 1) };
 }

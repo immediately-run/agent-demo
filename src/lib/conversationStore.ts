@@ -868,7 +868,6 @@ export function createConversationStore(opts: {
         ...(patch?.messages !== undefined ? { messages: patch.messages } : {}),
         ...(patch?.title !== undefined ? { title: patch.title } : {}),
         ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
-      ...(patch?.repoProvider !== undefined ? { repoProvider: patch.repoProvider } : {}),
         ...(patch?.repoProvider !== undefined ? { repoProvider: patch.repoProvider } : {}),
       };
       return save(next);
@@ -905,6 +904,10 @@ export function createConversationStore(opts: {
       foldedSeq: watermark,
       ...(patch?.title !== undefined ? { title: patch.title } : {}),
       ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
+      // R3-848 review round 1 (blocking): the journaled branch dropped the
+      // provider stamp, so the production two-tier path silently lost it and
+      // every record stayed "legacy" forever.
+      ...(patch?.repoProvider !== undefined ? { repoProvider: patch.repoProvider } : {}),
     };
     const saved = await save(next);
     // CLAMPED forward: appends that landed while the (synced-tier) record save
