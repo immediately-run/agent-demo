@@ -13,7 +13,7 @@
 // unstamped conversations ride along with every scope and get stamped on their
 // next save.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { postToRegion, onRegionMessage, revealRegion, useWorkspace } from "@immediately-run/sdk";
+import { postToRegion, onRegionMessage, revealRegion, useWorkspace, openRepository } from "@immediately-run/sdk";
 import { openConversationStore, metaOf, type ConversationStore } from "../lib/conversationStore";
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations, type RepoGroup } from "../lib/conversationScope";
@@ -53,7 +53,8 @@ export default function ConversationList() {
   // channel (R3-491). `undefined` when there is no editing session — the channel
   // reports `null` and `scopeConversations` then lists only unstamped conversations,
   // which is the honest answer rather than a guess.
-  const currentRepo = useWorkspace()?.label;
+  const workspace = useWorkspace();
+  const currentRepo = workspace?.label;
 
   // Scope the list (R3-475): this repo's conversations (plus legacy unstamped
   // ones) vs. every other repo, grouped. Pure rule in conversationScope.ts.
@@ -188,14 +189,44 @@ export default function ConversationList() {
       return;
     }
     try {
-      // Stamped with the loaded repo (R3-475) so it scopes correctly from birth.
-      const conv = await store.create(undefined, currentRepo);
+      // Stamped with the loaded repo (R3-475) so it scopes correctly from birth —
+      // label AND provider (R3-848): the label alone cannot say which provider
+      // the repo lives under.
+      const conv = await store.create(undefined, currentRepo, workspace?.provider);
       setItems((l) => [metaOf(conv), ...l]);
       setStoreError(null);
       openConversation(conv.id);
     } catch (e) {
       setStoreError(describeStoreFailure(e));
     }
+  };
+
+  // R3-848 — a refused repository open, shown ON the row that asked (never
+  // swallowed): keyed by the group's repo label.
+  const [openError, setOpenError] = useState<{ repo: string; code: string } | null>(null);
+
+  // Open another repo's row's repository in a new tab (R3-848): the
+  // host-mediated verb, called DIRECTLY from the click handler — no `await`
+  // before it, so the host still sees the click's transient activation (a
+  // deferred call is refused `no-activation`). The app names COORDINATES and
+  // nothing else: no URL, no route prefix — the host builds the destination.
+  // A refusal lands its code on the row.
+  const openRepoRow = (g: RepoGroup) => {
+    const at = g.repo.indexOf("/");
+    if (at <= 0) {
+      setOpenError({ repo: g.repo, code: "invalid" });
+      return;
+    }
+    void openRepository({
+      provider: g.provider ?? "github",
+      namespace: g.repo.slice(0, at),
+      repository: g.repo.slice(at + 1),
+    }).catch((e: { code?: string } | null) => {
+      // The legacy-record default: `provider` is stamped beside `repo` only
+      // since R3-848, and github is the only provider the platform has ever
+      // stamped — a record with no provider stamp predates it.
+      setOpenError({ repo: g.repo, code: e?.code ?? "unknown" });
+    });
   };
 
   const remove = async (id: string) => {
@@ -270,11 +301,11 @@ export default function ConversationList() {
       </ul>
 
       {/* Conversations belonging to OTHER repositories (R3-475): visible so they are
-          never lost, but never mixed into the list above. Opening one of these repos
-          in a new tab needs a host-mediated affordance — a tab opened from this
-          sandboxed frame inherits the sandbox (opaque origin, measured) and the
-          workbench cannot run in it — so until that lands the rows name the repo to
-          open rather than pretending a link works. */}
+          never lost, but never mixed into the list above. Each row OPENS that
+          repository in a new tab through the host-mediated `openRepository()` verb
+          (R3-476, wired by R3-848): a tab opened from this sandboxed frame would
+          inherit the sandbox (opaque origin, measured) and the workbench cannot
+          run in it, so the app asks the host — naming coordinates, never a URL. */}
       {ready && others.length > 0 && (
         <details className="cl-others">
           <summary>Other repositories</summary>
@@ -288,17 +319,29 @@ export default function ConversationList() {
               // naming is prohibited on role=generic, so aria-label would be a
               // placebo.)
               const label = countLabel(g);
+              const refused = openError?.repo === g.repo ? openError.code : null;
               return (
-                <li
-                  key={g.repo}
-                  className="cl-others-row"
-                  title={`Open ${g.repo} on immediately.run to see these conversations.`}
-                >
-                  <span className="cl-others-repo">{g.repo}</span>
-                  <span className="cl-others-count" title={label}>
-                    <span className="cl-vh">{label}</span>
-                    <span aria-hidden="true">{g.count}</span>
-                  </span>
+                <li key={g.repo} className="cl-others-row">
+                  {/* R3-848 — the open control is a real button (keyboard
+                      reachable, named from the row's content), not an onClick on
+                      the li; the count keeps R3-475's visually-hidden label. */}
+                  <button
+                    type="button"
+                    className="cl-others-open"
+                    title={`Open ${g.repo} on immediately.run to see these conversations.`}
+                    onClick={() => openRepoRow(g)}
+                  >
+                    <span className="cl-others-repo">{g.repo}</span>
+                    <span className="cl-others-count" title={label}>
+                      <span className="cl-vh">{label}</span>
+                      <span aria-hidden="true">{g.count}</span>
+                    </span>
+                  </button>
+                  {refused && (
+                    <span className="cl-others-refused" role="status">
+                      {refused}
+                    </span>
+                  )}
                 </li>
               );
             })}

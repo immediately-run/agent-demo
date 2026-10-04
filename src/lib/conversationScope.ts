@@ -11,6 +11,11 @@ export interface RepoGroup {
   count: number;
   /** Newest member's `updatedAt` — drives the group ordering. */
   updatedAt: number;
+  /** The newest member's `repoProvider` stamp (R3-848): the provider the repo
+   *  lived under when it was stamped, so the row that opens it passes it to
+   *  `openRepository()` rather than guessing. `undefined` when every member is
+   *  a legacy record that predates the provider stamp. */
+  provider?: string;
 }
 
 export interface ScopedConversations {
@@ -43,7 +48,7 @@ export function scopeConversations(
       g.count += 1;
       g.updatedAt = Math.max(g.updatedAt, c.updatedAt);
     } else {
-      byRepo.set(c.repo, { repo: c.repo, count: 1, updatedAt: c.updatedAt });
+      byRepo.set(c.repo, { repo: c.repo, count: 1, updatedAt: c.updatedAt, ...(c.repoProvider ? { provider: c.repoProvider } : {}) });
     }
   }
   return { mine, others: [...byRepo.values()].sort((a, b) => b.updatedAt - a.updatedAt) };

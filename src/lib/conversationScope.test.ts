@@ -63,3 +63,24 @@ describe('conversation repo stamping', () => {
     expect(reloaded?.repo).toBe('acme/app');
   });
 });
+
+// ── R3-848 — the group carries the newest member's provider stamp ────────────
+describe("RepoGroup.provider (R3-848)", () => {
+  const meta = (id: string, repo: string | undefined, repoProvider?: string) => ({
+    id,
+    title: id,
+    createdAt: 1,
+    updatedAt: 1,
+    ...(repo ? { repo, ...(repoProvider ? { repoProvider } : {}) } : {}),
+  });
+  it("a group formed from a stamped member carries its provider", () => {
+    const { others } = scopeConversations([meta("a", "other/repo", "github")], "mine/repo");
+    expect(others).toHaveLength(1);
+    expect(others[0].provider).toBe("github");
+  });
+  it("a legacy group (no member stamped) carries none — the row defaults, honestly", () => {
+    const { others } = scopeConversations([meta("a", "old/repo")], "mine/repo");
+    expect(others).toHaveLength(1);
+    expect(others[0].provider).toBeUndefined();
+  });
+});
