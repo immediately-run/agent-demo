@@ -126,6 +126,21 @@ export interface FsToolsOptions {
    * must not gamble the user's request on a guess.
    */
   vision?: boolean;
+  /**
+   * R3-862 — `download_file` is offered only when the app's catalog carries
+   * `fetch:fetch` (the host's `net:fetch` capability backs it) AND the byte
+   * transport is wired. The structural shape keeps this module host-free (the
+   * SDK's dist does not import under a bare unit runner).
+   */
+  catalog?: readonly { name: string }[];
+  /** The `hostFetch(url, { responseType: 'bytes' })` adapter, injected so the
+   *  tool's tests mock the wire. */
+  fetchBytes?: (url: string) => Promise<{
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    bodyBytes?: Uint8Array;
+  }>;
 }
 
 type ToolResult = ToolOutcome;
@@ -525,7 +540,8 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       // home (`imageMimeFor`; `.svg` is deliberately absent — it is text).
       if (imageMimeFor(abs) !== undefined) {
         return {
-          content: `write_file writes text; to add an image, copy an existing asset with copy_file`,
+          // R3-862: the URL case finally has its own tool — name it.
+          content: `write_file writes text; to add an image from a URL, download_file it; to reuse an existing asset, copy_file it`,
           isError: true,
         };
       }
@@ -796,6 +812,58 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
         return fsError(e);
       }
     },
+
+    // R3-862 — bytes from the network straight into the workspace, without the
+    // bytes entering the model's context (the movie-night-report failure: the
+    // model wrote the poster's URL string into avatar.jpg). Only the one-line
+    // result reaches the model.
+    async download_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      const fetchBytes = opts.fetchBytes;
+      if (!fetchBytes) return { content: 'forbidden: this app has no net:fetch grant to fetch with', isError: true };
+      const url = String(input.url ?? '');
+      const to = resolveWithin(root, String(input.path ?? ''));
+      if (!url) return { content: 'download_file requires a "url"', isError: true };
+      if (!to) return notFound;
+      try {
+        // Every check BEFORE the write — a failure never leaves a partial file.
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        let res;
+        try {
+          res = await fetchBytes(url);
+        } catch (e) {
+          // A host refusal carries a machine `.code` (forbidden/blocked/invalid/
+          // redirect/too-large/network) — pass it through, naming the fix for the
+          // one the user can act on. `too-large` is the host's cap, relayed (R19).
+          const c = code(e);
+          if (c === 'forbidden') {
+            return { content: `forbidden: this host is not in the app's net:fetch allowlist — ${message(e)}`, isError: true };
+          }
+          return { content: `${c ?? 'error'}: ${message(e)}`, isError: true };
+        }
+        if (res.status < 200 || res.status >= 300) {
+          return { content: `the server answered ${res.status}`, isError: true };
+        }
+        const contentType = Object.entries(res.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? 'unknown';
+        const bytes = res.bodyBytes;
+        if (!bytes) return { content: 'error: the host returned no bytes (responseType: bytes)', isError: true };
+        // A page saved as ".jpg" is the corruption this tool exists to prevent —
+        // an image-named path requires image/* bytes.
+        const dot = to.lastIndexOf('.');
+        const ext = dot === -1 ? '' : to.slice(dot + 1).toLowerCase();
+        if (BINARY_IMAGE_EXTENSIONS.includes(ext) && !contentType.toLowerCase().startsWith('image/')) {
+          return { content: `the URL returned ${contentType}, not an image`, isError: true };
+        }
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.writeFile(to, bytes);
+        return { content: `saved ${bytes.length} bytes (${contentType}) to ${rel(to)}` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
   };
 
   const obj = (props: Record<string, unknown>): { type: 'object'; properties: Record<string, unknown>; additionalProperties: boolean } => ({
@@ -817,6 +885,22 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     { name: 'copy_file', description: 'Copy a workspace file byte-for-byte — safe for images and other binary assets, which a read-then-write through text would corrupt. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
     { name: 'replace_in_files', description: 'Replace an exact literal string across many files — the tool for renaming a symbol project-wide. Scope it with `path` and/or `glob`. Reports WHICH files changed and how many sites in each. Run it with `dry_run: true` first to see the blast radius, and read the result back with a diff before proposing it.', input_schema: obj({ old_string: str('Exact literal text to replace (not a regex).'), new_string: str('Replacement text, inserted verbatim.'), path: str('Subtree to search (default: workspace root).'), glob: str('Only files whose workspace-relative path matches this glob, e.g. "src/**/*.ts".'), dry_run: { type: 'boolean', description: 'Report what WOULD change without writing anything (default false).' } }) },
     { name: 'delete_file', description: 'Delete a workspace file.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
+    // R3-862: offered only when the app can actually fetch (the catalog carries
+    // `fetch:fetch`) and the transport is wired — absent rather than fake.
+    ...(opts.fetchBytes && opts.catalog?.some((m) => m.name === 'fetch:fetch')
+      ? [
+          {
+            name: 'download_file',
+            description:
+              "Download a URL's bytes into a workspace file — use this for images and other binary assets; never write_file. The bytes never enter the conversation; you get one line back (size, content type, path). Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.",
+            input_schema: obj({
+              url: str('The URL to download (fetched by the host under the app’s net:fetch allowlist).'),
+              path: str('Workspace-relative destination path.'),
+              overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' },
+            }),
+          },
+        ]
+      : []),
   ];
 
   const execute: ToolExecutor = async (name, input) => {
