@@ -13,6 +13,7 @@ import {
   postToRegion,
   onRegionMessage,
   describeChat,
+  hostFetch,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
@@ -166,7 +167,13 @@ export default function ConversationStage() {
     // `withSkills` offers nothing and `load_skill` is absent — the authoring skills
     // would be advice the agent cannot act on (R3-331).
     if (!stageTree) return withSkills(catalogToolset(catalog));
-    const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly, vision });
+    const fsTools = createFsToolset({
+      root: stageTree.root,
+      readOnly: stageTree.readOnly,
+      vision,
+      catalog,
+      fetchBytes: (url) => hostFetch(url, { responseType: "bytes" }),
+    });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     // R3-332: git-READ over the same working tree. Empty (and therefore invisible to

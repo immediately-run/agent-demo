@@ -483,10 +483,18 @@ describe('write_file — text into an image path is refused (R3-856)', () => {
       content: 'https://example.com/avatar.jpg',
     });
     expect(res).toEqual({
+      // No fetch:fetch in this toolset's catalog → the refusal does not name
+      // the tool the model was never given (review round 1).
       content: 'write_file writes text; to add an image, copy an existing asset with copy_file',
       isError: true,
     });
     expect(fs.files.has('/app/src/assets/posters/avatar.jpg')).toBe(false);
+  });
+
+  it('names download_file in the refusal only when the tool was listed', async () => {
+    const withFetch = createFsToolset({ root: '/app', fs: seed(), catalog: [{ name: 'fetch:fetch' }], fetchBytes: async () => { throw new Error('unused'); } });
+    const res = await withFetch.execute('write_file', { path: 'a.jpg', content: 'x' });
+    expect(res.content).toContain('download_file');
   });
 
   it('.svg is text and stays writable', async () => {
@@ -506,5 +514,115 @@ describe('write_file — text into an image path is refused (R3-856)', () => {
     }
     // case-insensitive on the extension
     expect((await ts(seed()).execute('write_file', { path: 'a.JPG', content: 'x' })).isError).toBe(true);
+  });
+});
+
+// ── R3-862 — download_file: bytes from the network into the workspace ────────
+// The movie-night-report failure: the agent wrote a poster's URL string into
+// avatar.jpg. The bytes never enter the model's context — only the one-line
+// result does. `fetchBytes` is the mocked hostFetch(bytes) adapter.
+describe('download_file (R3-862)', () => {
+  // A byte-faithful fake fs (the shared MemFs stores strings).
+  class BytesFs {
+    files = new Map<string, Uint8Array>();
+    dirs = new Set<string>(['/']);
+    private err(code: string): Error {
+      return Object.assign(new Error(code), { code });
+    }
+    async readFile(path: string): Promise<Uint8Array> {
+      const f = this.files.get(path);
+      if (!f) throw this.err(this.dirs.has(path) ? 'EISDIR' : 'ENOENT');
+      return f;
+    }
+    async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+      this.files.set(path, typeof data === 'string' ? new TextEncoder().encode(data) : data);
+      let d = path.slice(0, path.lastIndexOf('/'));
+      while (d) {
+        this.dirs.add(d);
+        d = d.slice(0, d.lastIndexOf('/'));
+      }
+    }
+    async mkdir(): Promise<unknown> {
+      return undefined;
+    }
+    async readdir(): Promise<never[]> {
+      return [];
+    }
+    async stat(path: string): Promise<FsStat> {
+      if (this.files.has(path)) {
+        return { size: this.files.get(path)!.length, mtimeMs: 1, isFile: () => true, isDirectory: () => false };
+      }
+      if (this.dirs.has(path)) return { size: 0, mtimeMs: 1, isFile: () => false, isDirectory: () => true };
+      throw this.err('ENOENT');
+    }
+    async unlink(path: string): Promise<void> {
+      if (!this.files.delete(path)) throw this.err('ENOENT');
+    }
+  }
+
+  // The real 1×1 transparent PNG, 70 bytes.
+  const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+  const CATALOG = [{ name: 'fetch:fetch' }];
+  const okFetch = (bytes: Uint8Array = PNG, contentType = 'image/png') => async () =>
+    ({ status: 200, statusText: 'OK', headers: { 'content-type': contentType }, bodyBytes: bytes });
+  const mk = (fetchBytes: unknown, catalog: readonly { name: string }[] = CATALOG) =>
+    createFsToolset({ root: '/app', fs: new BytesFs() as unknown as FsPortLike, catalog, fetchBytes: fetchBytes as never });
+
+  it('a real PNG downloads byte-identical, and the model sees one line', async () => {
+    const fs = new BytesFs();
+    const tsx = createFsToolset({ root: '/app', fs: fs as unknown as FsPortLike, catalog: CATALOG, fetchBytes: okFetch() });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'src/assets/p.png' });
+    expect(res).toEqual({ content: 'saved 70 bytes (image/png) to src/assets/p.png' });
+    expect(fs.files.get('/app/src/assets/p.png')).toEqual(PNG);
+  });
+
+  it('an image path receiving text/html is refused and writes nothing', async () => {
+    const fs = new BytesFs();
+    const tsx = createFsToolset({ root: '/app', fs: fs as unknown as FsPortLike, catalog: CATALOG, fetchBytes: okFetch(PNG, 'text/html') });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/page', path: 'posters/avatar.jpg' });
+    expect(res).toEqual({ content: 'the URL returned text/html, not an image', isError: true });
+    expect(fs.files.size).toBe(0);
+  });
+
+  it('a 404 is refused with the status named', async () => {
+    const tsx = mk(async () => ({ status: 404, statusText: 'Not Found', headers: {}, bodyBytes: undefined }));
+    const res = await tsx.execute('download_file', { url: 'https://example.com/gone.png', path: 'gone.png' });
+    expect(res).toEqual({ content: 'the server answered 404', isError: true });
+  });
+
+  it('a forbidden refusal carries the allowlist hint', async () => {
+    const tsx = mk(async () => {
+      throw Object.assign(new Error('outside the allowlist'), { code: 'forbidden' });
+    });
+    const res = await tsx.execute('download_file', { url: 'https://tracker.example/x.png', path: 'x.png' });
+    expect(res.content).toContain("forbidden: this host is not in the app's net:fetch allowlist");
+    expect(res.isError).toBe(true);
+  });
+
+  it('an existing path without overwrite is refused before the fetch', async () => {
+    let fetched = 0;
+    const fs = new BytesFs();
+    await fs.writeFile('/app/existing.png', PNG);
+    const tsx = createFsToolset({
+      root: '/app',
+      fs: fs as unknown as FsPortLike,
+      catalog: CATALOG,
+      fetchBytes: (async () => {
+        fetched++;
+        return { status: 200, statusText: 'OK', headers: { 'content-type': 'image/png' }, bodyBytes: PNG };
+      }) as never,
+    });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'existing.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('already exists');
+    expect(fetched).toBe(0);
+  });
+
+  it('a catalog without fetch:fetch does not list download_file', () => {
+    expect(mk(okFetch(), []).tools.some((t) => t.name === 'download_file')).toBe(false);
+    expect(mk(okFetch()).tools.some((t) => t.name === 'download_file')).toBe(true);
+    // And no transport wired at all → not listed either.
+    const bare = createFsToolset({ root: '/app', fs: new BytesFs() as unknown as FsPortLike });
+    expect(bare.tools.some((t) => t.name === 'download_file')).toBe(false);
   });
 });
