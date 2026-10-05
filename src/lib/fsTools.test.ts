@@ -483,10 +483,18 @@ describe('write_file — text into an image path is refused (R3-856)', () => {
       content: 'https://example.com/avatar.jpg',
     });
     expect(res).toEqual({
-      content: 'write_file writes text; to add an image from a URL, download_file it; to reuse an existing asset, copy_file it',
+      // No fetch:fetch in this toolset's catalog → the refusal does not name
+      // the tool the model was never given (review round 1).
+      content: 'write_file writes text; to add an image, copy an existing asset with copy_file',
       isError: true,
     });
     expect(fs.files.has('/app/src/assets/posters/avatar.jpg')).toBe(false);
+  });
+
+  it('names download_file in the refusal only when the tool was listed', async () => {
+    const withFetch = createFsToolset({ root: '/app', fs: seed(), catalog: [{ name: 'fetch:fetch' }], fetchBytes: async () => { throw new Error('unused'); } });
+    const res = await withFetch.execute('write_file', { path: 'a.jpg', content: 'x' });
+    expect(res.content).toContain('download_file');
   });
 
   it('.svg is text and stays writable', async () => {
@@ -561,15 +569,10 @@ describe('download_file (R3-862)', () => {
     createFsToolset({ root: '/app', fs: new BytesFs() as unknown as FsPortLike, catalog, fetchBytes: fetchBytes as never });
 
   it('a real PNG downloads byte-identical, and the model sees one line', async () => {
-    const toolset = mk(okFetch());
-    const res = await toolset.execute('download_file', { url: 'https://example.com/p.png', path: 'src/assets/p.png' });
-    expect(res).toEqual({ content: 'saved 70 bytes (image/png) to src/assets/p.png' });
-    const fsx = (toolset as never as { fs: BytesFs }); // not exposed; re-create below instead
-    void fsx;
-    // Re-run against a held fake to assert the bytes on disk.
     const fs = new BytesFs();
     const tsx = createFsToolset({ root: '/app', fs: fs as unknown as FsPortLike, catalog: CATALOG, fetchBytes: okFetch() });
-    await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'src/assets/p.png' });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'src/assets/p.png' });
+    expect(res).toEqual({ content: 'saved 70 bytes (image/png) to src/assets/p.png' });
     expect(fs.files.get('/app/src/assets/p.png')).toEqual(PNG);
   });
 

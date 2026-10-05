@@ -378,6 +378,10 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const p: FsPortLike = opts.fs ?? (fs.promises as unknown as FsPortLike);
   const readOnly = opts.readOnly ?? false;
   const vision = opts.vision ?? false;
+  // R3-862: the ONE predicate for offering `download_file` (catalog grant + wired
+  // transport) — the listing AND the write_file refusal read it, so a refusal
+  // never names a tool the model was not given (review round 1, both reviewers).
+  const downloadOffered = Boolean(opts.fetchBytes && opts.catalog?.some((m) => m.name === 'fetch:fetch'));
 
   const rel = (abs: string): string => {
     const r = abs === root ? '' : abs.slice(root.length + 1);
@@ -540,8 +544,11 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       // home (`imageMimeFor`; `.svg` is deliberately absent — it is text).
       if (imageMimeFor(abs) !== undefined) {
         return {
-          // R3-862: the URL case finally has its own tool — name it.
-          content: `write_file writes text; to add an image from a URL, download_file it; to reuse an existing asset, copy_file it`,
+          // R3-862: the URL case finally has its own tool — name it WHEN it was
+          // listed (the catalog may not carry fetch:fetch; absent, not fake).
+          content: downloadOffered
+            ? `write_file writes text; to add an image from a URL, download_file it; to reuse an existing asset, copy_file it`
+            : `write_file writes text; to add an image, copy an existing asset with copy_file`,
           isError: true,
         };
       }
@@ -851,9 +858,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
         if (!bytes) return { content: 'error: the host returned no bytes (responseType: bytes)', isError: true };
         // A page saved as ".jpg" is the corruption this tool exists to prevent —
         // an image-named path requires image/* bytes.
-        const dot = to.lastIndexOf('.');
-        const ext = dot === -1 ? '' : to.slice(dot + 1).toLowerCase();
-        if (BINARY_IMAGE_EXTENSIONS.includes(ext) && !contentType.toLowerCase().startsWith('image/')) {
+        if (imageMimeFor(to) !== undefined && !contentType.toLowerCase().startsWith('image/')) {
           return { content: `the URL returned ${contentType}, not an image`, isError: true };
         }
         const slash = to.lastIndexOf('/');
@@ -887,7 +892,7 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     { name: 'delete_file', description: 'Delete a workspace file.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
     // R3-862: offered only when the app can actually fetch (the catalog carries
     // `fetch:fetch`) and the transport is wired — absent rather than fake.
-    ...(opts.fetchBytes && opts.catalog?.some((m) => m.name === 'fetch:fetch')
+    ...(downloadOffered
       ? [
           {
             name: 'download_file',
