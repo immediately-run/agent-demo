@@ -239,11 +239,16 @@ describe("ConversationList — other-repositories rows open the repository (R3-8
     const row = screen.getByRole("button", { name: /other\/repo/ });
     fireEvent.click(row);
     expect(openRepository).toHaveBeenCalledTimes(1);
-    expect(openRepository).toHaveBeenCalledWith({
-      provider: "github",
-      namespace: "other",
-      repository: "repo",
-    });
+    expect(openRepository).toHaveBeenCalledWith(
+      {
+        provider: "github",
+        namespace: "other",
+        repository: "repo",
+      },
+      // R3-1033: the reveal names the conversations panel — the click came from
+      // here, and the clicked conversation is stamped for the target repo.
+      { panel: "agent" },
+    );
   });
 
   it("the call happens synchronously inside the handler — no await can slip in front of it", async () => {
