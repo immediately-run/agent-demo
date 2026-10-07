@@ -15,6 +15,7 @@ import fs from 'fs';
 import type { ImageBlock, ToolExecutor, ToolOutcome } from './agentLoop';
 import type { Toolset } from './toolset';
 import { normalizeGrepFlags, ignoredFlagsNote } from './grepFlags';
+import { isDisposalConstantMessage, unwrapSuppressed } from './storeError';
 
 /** The slice of `fs.promises` these tools use — narrowed so tests can inject an
  *  in-memory fake without pulling in the whole node surface. */
@@ -249,12 +250,23 @@ const message = (e: unknown): string => (e as Error)?.message ?? String(e);
 
 /** Map a thrown fs error to a model-readable result (no chroot disclosure). */
 function fsError(e: unknown): ToolResult {
-  const c = code(e);
-  if (c === 'ENOENT') return { content: 'not found', isError: true };
-  if (c === 'EROFS' || c === 'EACCES' || c === 'EPERM') return { content: 'read-only: this mount cannot be written', isError: true };
-  if (c === 'EISDIR') return { content: 'that path is a directory, not a file', isError: true };
-  if (c === 'ENOTDIR') return { content: 'a path segment is a file, not a directory', isError: true };
-  return { content: `${c ?? 'error'}: ${message(e)}`, isError: true };
+  // R3-1026 — a ZenFS SuppressedError's own message is the useless constant
+  // "An error was suppressed during disposal."; the real cause rides
+  // .suppressed/.error. Unwrap first (the one unwrapper home is storeError's):
+  // the chain leads with the innermost cause, so the first code-bearing entry
+  // wins, and a code-less chain surfaces the innermost MESSAGE — never the
+  // constant — so the model and the transcript see the real failure.
+  const chain = unwrapSuppressed(e);
+  for (const cause of chain) {
+    const c = code(cause);
+    if (c === 'ENOENT') return { content: 'not found', isError: true };
+    if (c === 'EROFS' || c === 'EACCES' || c === 'EPERM') return { content: 'read-only: this mount cannot be written', isError: true };
+    if (c === 'EISDIR') return { content: 'that path is a directory, not a file', isError: true };
+    if (c === 'ENOTDIR') return { content: 'a path segment is a file, not a directory', isError: true };
+    if (c) return { content: `${c}: ${message(cause)}`, isError: true };
+  }
+  const inner = chain.map(message).find((m) => !isDisposalConstantMessage(m));
+  return { content: `error: ${inner ?? message(e)}`, isError: true };
 }
 
 const notFound: ToolResult = { content: 'not found', isError: true };
@@ -792,8 +804,10 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
           await p.writeFile(abs, text.split(oldStr).join(newStr));
         } catch (e) {
           // Report what already changed rather than pretending the whole run failed.
+          // R3-1026: fsError here too — a SuppressedError from this write would
+          // otherwise reach the model as the disposal constant.
           const partial = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
-          return { content: `failed writing ${r}: ${message(e)}\nchanged so far:\n${partial}`, isError: true };
+          return { content: `failed writing ${r}: ${fsError(e).content}\nchanged so far:\n${partial}`, isError: true };
         }
       }
       if (changed.length === 0) return { content: '(no matches)' };

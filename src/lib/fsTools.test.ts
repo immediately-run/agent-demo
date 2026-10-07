@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, BINARY_IMAGE_EXTENSIONS, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
+import { suppressed } from './testing/suppressedError';
 
 // AA-23: the workbench agent must author the STAGE app's conferred working tree
 // (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
@@ -408,6 +409,54 @@ describe('read_file offset/limit paging (R3-223)', () => {
 // from one owner session (the movie-night-report build): `edits: []` beside a
 // complete pair, grep's `flags: "n"` read as a RegExp flag, and text written
 // into an image path after a failed fetch.
+describe('fsError unwraps a SuppressedError (R3-1026)', () => {
+  // ZenFS disposal wraps the REAL write failure in a SuppressedError whose own
+  // message is the constant "An error was suppressed during disposal." — live on
+  // the venue 2026-10-07, edit_file surfaced exactly that, twice, and the cause
+  // never reached the model. The fixture is the shared one (testing/suppressedError).
+  const throwingFs = (thrown: unknown): MemFs => {
+    const fs = seed();
+    fs.writeFile = async () => {
+      throw thrown;
+    };
+    return fs;
+  };
+
+  it('write_file surfaces the innermost code, not the disposal constant', async () => {
+    const cause = Object.assign(new Error('permission on overlay'), { code: 'EACCES' });
+    const res = await ts(throwingFs(suppressed(cause, new Error('disposal also failed')))).execute('write_file', { path: 'src/x.ts', content: 'x' });
+    expect(res).toEqual({ content: 'read-only: this mount cannot be written', isError: true });
+  });
+
+  it('edit_file surfaces the innermost MESSAGE when no cause carries a code', async () => {
+    const res = await ts(throwingFs(suppressed(new Error('overlay write failed: backing store vanished'), new Error('disposal also failed')))).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: 'TODO refactor',
+      new_string: 'cleaned',
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content).toBe('error: overlay write failed: backing store vanished');
+    expect(res.content).not.toContain('suppressed during disposal');
+  });
+
+  it('a plain (unwrapped) error behaves exactly as before', async () => {
+    const res = await ts(throwingFs(Object.assign(new Error('disk full'), { code: 'ENOSPC' }))).execute('write_file', {
+      path: 'src/x.ts',
+      content: 'x',
+    });
+    expect(res).toEqual({ content: 'ENOSPC: disk full', isError: true });
+  });
+
+  it('replace_in_files routes its write failure through the same unwrap (round-1 finding)', async () => {
+    const fs = throwingFs(suppressed(new Error('overlay write failed: backing store vanished'), new Error('disposal also failed')));
+    const res = await ts(fs).execute('replace_in_files', { old_string: 'TODO', new_string: 'DONE', paths: ['src'] });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('overlay write failed: backing store vanished');
+    expect(res.content).not.toContain('suppressed during disposal');
+    expect(res.content).toContain('changed so far');
+  });
+});
+
 describe('edit_file — an empty edits[] carries no intent (R3-856)', () => {
   it('old_string/new_string with edits: [] applies the single edit', async () => {
     const fs = seed();
