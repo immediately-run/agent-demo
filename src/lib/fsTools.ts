@@ -15,7 +15,7 @@ import fs from 'fs';
 import type { ImageBlock, ToolExecutor, ToolOutcome } from './agentLoop';
 import type { Toolset } from './toolset';
 import { normalizeGrepFlags, ignoredFlagsNote } from './grepFlags';
-import { unwrapSuppressed } from './storeError';
+import { isDisposalConstantMessage, unwrapSuppressed } from './storeError';
 
 /** The slice of `fs.promises` these tools use — narrowed so tests can inject an
  *  in-memory fake without pulling in the whole node surface. */
@@ -265,7 +265,7 @@ function fsError(e: unknown): ToolResult {
     if (c === 'ENOTDIR') return { content: 'a path segment is a file, not a directory', isError: true };
     if (c) return { content: `${c}: ${message(cause)}`, isError: true };
   }
-  const inner = chain.map(message).find((m) => !/suppressed during disposal/i.test(m));
+  const inner = chain.map(message).find((m) => !isDisposalConstantMessage(m));
   return { content: `error: ${inner ?? message(e)}`, isError: true };
 }
 
@@ -804,8 +804,10 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
           await p.writeFile(abs, text.split(oldStr).join(newStr));
         } catch (e) {
           // Report what already changed rather than pretending the whole run failed.
+          // R3-1026: fsError here too — a SuppressedError from this write would
+          // otherwise reach the model as the disposal constant.
           const partial = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
-          return { content: `failed writing ${r}: ${message(e)}\nchanged so far:\n${partial}`, isError: true };
+          return { content: `failed writing ${r}: ${fsError(e).content}\nchanged so far:\n${partial}`, isError: true };
         }
       }
       if (changed.length === 0) return { content: '(no matches)' };

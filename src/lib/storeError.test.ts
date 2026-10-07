@@ -1,17 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { describeStoreFailure, unwrapSuppressed, leaseFailure, leaseFailureText, leaseHeldText } from "./storeError";
-
-/** Build a real SuppressedError the way the engine does for a failed `await using`:
- *  `error` is what disposal threw, `suppressed` is the original body failure. */
-const suppressed = (original: unknown, disposal: unknown): Error => {
-  const e = new Error("An error was suppressed during disposal.") as Error & {
-    suppressed?: unknown;
-    error?: unknown;
-  };
-  e.suppressed = original;
-  e.error = disposal;
-  return e;
-};
+import { suppressed } from "./testing/suppressedError";
 
 const coded = (code: string, message = "boom"): Error => {
   const e = new Error(message) as Error & { code?: string };
