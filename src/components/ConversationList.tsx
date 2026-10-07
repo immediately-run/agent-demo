@@ -224,7 +224,11 @@ export default function ConversationList() {
       });
       return;
     }
-    void openRepository(coords)
+    // R3-1033: the reveal rides the open — the click came FROM the conversations
+    // panel, and the clicked conversation is stamped for the target repo, so the
+    // target opens entered at the agents activity (the host's chrome; never a
+    // destination — the host still builds every URL).
+    void openRepository(coords, { panel: "agent" })
       .then(() => {
         // A success clears the row's earlier refusal, if any — a refusal that
         // no longer holds must not stay on the row.
