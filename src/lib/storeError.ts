@@ -25,16 +25,16 @@ type MaybeSuppressed = {
 const isObj = (v: unknown): v is MaybeSuppressed =>
   typeof v === "object" && v !== null;
 
-/**
- * Flatten a (possibly nested) `SuppressedError` into the chain of underlying
- * errors, innermost causes first. A plain error yields itself.
- */
 /** The ZenFS/engine disposal constant — the one home for recognizing it (R3-1026
  *  review: it was spelled in two modules). Anchored to the FULL constant: a real
  *  cause whose message merely CONTAINS the phrase must not be mistaken for it. */
 export const isDisposalConstantMessage = (m: string): boolean =>
   /^an error was suppressed during disposal\.?$/i.test(m.trim());
 
+/**
+ * Flatten a (possibly nested) `SuppressedError` into the chain of underlying
+ * errors, innermost causes first. A plain error yields itself.
+ */
 export function unwrapSuppressed(e: unknown, depth = 0): unknown[] {
   if (!isObj(e) || depth > 8) return [e];
   const out: unknown[] = [];
