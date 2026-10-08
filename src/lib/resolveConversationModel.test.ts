@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { deriveChatProviderState, type ChatProviderInfo } from '@immediately-run/sdk';
 import {
   resolveConversationModel,
+  runFeaturesFor,
   runModelFor,
   toHostModelView,
   type HostModelView,
@@ -64,7 +65,7 @@ describe('resolveConversationModel (R3-620)', () => {
 const info = (over: Partial<ChatProviderInfo> = {}): ChatProviderInfo => ({
   providerId: 'llm.chat.openrouter',
   hostVouched: true,
-  features: { tools: true, vision: false, jsonMode: false, reasoning: false, maxContextTokens: 200000 },
+  features: { tools: true, vision: true, jsonMode: false, reasoning: false, maxContextTokens: 200000 },
   models: { fast: 'quick/model', smart: 'capable/model' },
   connectedProviders: [
     { providerId: 'llm.chat.openrouter', displayName: 'OpenRouter', models: ['capable/model', 'quick/model'] },
@@ -127,5 +128,29 @@ describe('runModelFor (R3-620) — what rides chat()', () => {
   it('a stored model the provider no longer suggests still rides — the host passes the string through', () => {
     const unlisted = { providerId: 'llm.chat.anthropic', model: 'claude-retired' };
     expect(runModelFor({ model: unlisted }, configured())).toEqual(unlisted);
+  });
+});
+
+describe('runFeaturesFor (R3-620) — what a run sizes itself by', () => {
+  it('the default run uses the described provider features', () => {
+    expect(runFeaturesFor(undefined, configured())).toEqual({ contextWindow: 200000, vision: true });
+  });
+
+  it('a chosen model on the described provider keeps them', () => {
+    expect(runFeaturesFor({ providerId: 'llm.chat.openrouter', model: 'quick/model' }, configured())).toEqual({
+      contextWindow: 200000,
+      vision: true,
+    });
+  });
+
+  it('a chosen model on another provider gets no image parts and no context budget', () => {
+    expect(runFeaturesFor({ providerId: 'llm.chat.anthropic', model: 'claude-x' }, configured())).toEqual({
+      vision: false,
+    });
+  });
+
+  it('no configured provider → nothing to size by', () => {
+    expect(runFeaturesFor(undefined, deriveChatProviderState(true, false, null))).toEqual({ vision: false });
+    expect(runFeaturesFor(undefined, deriveChatProviderState(false, false, null))).toEqual({ vision: false });
   });
 });

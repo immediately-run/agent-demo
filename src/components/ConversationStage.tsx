@@ -12,7 +12,6 @@ import {
   useWorkspace,
   postToRegion,
   onRegionMessage,
-  describeChat,
   describeChatState,
   useChatProviderState,
   hostFetch,
@@ -25,13 +24,20 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
-import { runModelFor, toHostModelView } from "../lib/resolveConversationModel";
+import { runFeaturesFor, runModelFor, toHostModelView } from "../lib/resolveConversationModel";
 import { runAgent, type RunState } from "../lib/agentLoop";
 import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
 import { repairTranscript, interrupted, divergenceMessage, resumedMessages } from "../lib/resume";
 import { useLeaseRefresh } from "../hooks/useLeaseRefresh";
-import { openConversationStore, deriveTitle, isJournalRefusal, type ConversationStore, type ReplayResult } from "../lib/conversationStore";
+import {
+  openConversationStore,
+  createConversationWithModel,
+  deriveTitle,
+  isJournalRefusal,
+  type ConversationStore,
+  type ReplayResult,
+} from "../lib/conversationStore";
 import {
   openSessionProjectionWriter,
   createProjectionPublisher,
@@ -109,6 +115,8 @@ export default function ConversationStage() {
   // the picker re-renders on a switch AND on a save, neither of which a ref
   // alone triggers).
   const [convModel, setConvModel] = useState<Conversation["model"]>(undefined);
+  // A choice made before the conversation's record exists (R3-620).
+  const pendingModelRef = useRef<Conversation["model"]>(undefined);
   // Why persistence is unavailable, if it is. The conversation store is not a
   // nice-to-have: `run()` reads the model's HISTORY out of the persisted
   // conversation, so a dead store silently downgrades the agent to a stateless
@@ -165,10 +173,6 @@ export default function ConversationStage() {
   // Tools given to the model. Without the stage tree the agent gets the catalog ONLY —
   // no filesystem tools — so it can never edit the wrong (its own) repo. Run is gated
   // below and a "workspace not ready" notice is shown.
-  // R3-339 — does the model the user configured accept images? The tool is told, so a
-  // `read_file` on a PNG can SAY the model cannot look at it instead of sending
-  // something that errors upstream. Re-read when the provider changes.
-  const vision = useMemo(() => describeChat()?.features.vision === true, []);
 
   // R3-620 — the host's model view for the per-conversation choice: the Settings
   // default (what `chat()` with no pair runs — the resolved provider + the tier
@@ -178,6 +182,14 @@ export default function ConversationStage() {
   // panel and any stage app see it stripped, and the picker stays absent).
   const providerState = useChatProviderState();
   const hostModelView = useMemo(() => toHostModelView(providerState), [providerState]);
+  // R3-339 — does the model this conversation runs on accept images? The tool is
+  // told, so a `read_file` on a PNG can say the model cannot look at it instead of
+  // sending something that errors upstream. The host describes the default
+  // provider's features only, so a conversation on another provider gets "no".
+  const vision = useMemo(
+    () => runFeaturesFor(runModelFor({ model: convModel }, providerState), providerState).vision,
+    [convModel, providerState],
+  );
   // The connected choices for the picker (undefined when this frame holds no
   // `llm:chooseModel` — the picker then renders nothing).
   const connectedChoices = useMemo(
@@ -185,29 +197,32 @@ export default function ConversationStage() {
       providerState.status === "configured" ? providerState.provider.connectedProviders : undefined,
     [providerState],
   );
-  // R3-620 — store the user's per-conversation choice on the RECORD (absent =
+  // R3-620 — store the user's per-conversation choice on the record (absent =
   // the Settings default). The run in flight keeps its own resolved pair; the
-  // choice applies to the next run.
-  const chooseModel = useCallback(
-    async (pair: { providerId: string; model: string } | null) => {
-      const store = storeRef.current;
-      const conv = convRef.current;
-      if (!store || !conv || runningIdRef.current !== null) return;
-      try {
-        convRef.current = await store.save({
-          ...conv,
-          ...(pair ? { model: pair } : { model: undefined }),
-        });
-        setConvModel(pair ?? undefined);
-        setStoreError(null);
-        publisherRef.current?.onSaved();
-        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
-      } catch (e) {
-        setStoreError(describe(e, NO_STORE_SUFFIX));
-      }
-    },
-    [],
-  );
+  // choice applies to the next run. Before the first run there is no record yet
+  // (it is created at kickoff), so the choice is held and stamped on it then.
+  const chooseModel = useCallback(async (pair: { providerId: string; model: string } | null) => {
+    if (runningIdRef.current !== null) return;
+    const store = storeRef.current;
+    const conv = convRef.current;
+    if (!store || !conv) {
+      pendingModelRef.current = pair ?? undefined;
+      setConvModel(pair ?? undefined);
+      return;
+    }
+    try {
+      const saved = await store.setModel(conv.id, pair);
+      // The user may have opened another conversation while the save was in flight.
+      if (convRef.current?.id !== conv.id) return;
+      if (saved) convRef.current = { ...convRef.current, model: saved.model };
+      setConvModel(pair ?? undefined);
+      setStoreError(null);
+      publisherRef.current?.onSaved();
+      void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+    } catch (e) {
+      setStoreError(describe(e, NO_STORE_SUFFIX));
+    }
+  }, []);
 
   const { toolset, skills } = useMemo(() => {
     // No conferred stage tree ⇒ a catalog-only toolset with no authoring tools, so
@@ -271,6 +286,7 @@ export default function ConversationStage() {
 
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
+    pendingModelRef.current = undefined;
     setConvId(conv.id);
     setTitle(conv.title);
     setConvModel(conv.model);
@@ -486,7 +502,13 @@ export default function ConversationStage() {
     let conv = convRef.current;
     if (!conv && store) {
       try {
-        conv = await store.create(undefined, workspaceRepo, workspaceProvider);
+        // A model chosen before this record existed is stamped on it now.
+        conv = await createConversationWithModel(store, {
+          repo: workspaceRepo,
+          repoProvider: workspaceProvider,
+          model: pendingModelRef.current,
+        });
+        pendingModelRef.current = undefined;
         convRef.current = conv;
         stageSelectionRef.current!.adopt(conv);
         setTitle(conv.title);
@@ -558,7 +580,9 @@ export default function ConversationStage() {
     // R3-620 — the per-conversation choice, resolved at kickoff from the record
     // against the LIVE connected set (a stale record cannot pin a gone provider);
     // a pair from the record rides the chat request, the default stays host-side.
-    const runModel = runModelFor(convRef.current, describeChatState());
+    // No record (the store is unavailable): the held choice still applies to this run.
+    const chatState = describeChatState();
+    const runModel = runModelFor(convRef.current ?? { model: pendingModelRef.current }, chatState);
     try {
       const transcript = await runAgent({
         client: createChatModelClient(runModel),
@@ -576,7 +600,7 @@ export default function ConversationStage() {
         // R3-562 (§7 R-ARD-20a): pause at turn boundaries while this region is hidden.
         pause,
         // Token accounting + auto-compaction let the loop run past ~12 turns (R3-220).
-        contextWindow: describeChat()?.features.maxContextTokens,
+        contextWindow: runFeaturesFor(runModel, chatState).contextWindow,
         events: {
           // R3-559: append every boundary to the conversation's journal. The loop
           // awaits this before proceeding — the write's latency IS the
@@ -783,7 +807,8 @@ export default function ConversationStage() {
     const pinnedPrefix = replay.systemPrefix ?? buildPinnedPrefix({ today: todayIso() });
     // R3-620 — the same resolution as a fresh run: a resumed conversation keeps
     // its chosen model, or falls back to the default when that provider is gone.
-    const runModel = runModelFor(convRef.current, describeChatState());
+    const chatState = describeChatState();
+    const runModel = runModelFor(convRef.current, chatState);
     try {
       const transcript = await runAgent({
         client: createChatModelClient(runModel),
@@ -799,7 +824,7 @@ export default function ConversationStage() {
         signal: controller.signal,
         steering: steeringC,
         pause,
-        contextWindow: describeChat()?.features.maxContextTokens,
+        contextWindow: runFeaturesFor(runModel, chatState).contextWindow,
         events: {
           onBoundary: async (b) => {
             await store.append(conv.id, b);

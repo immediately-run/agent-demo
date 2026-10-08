@@ -4,7 +4,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // doesn't load the full SDK (these tests use the fs-injected core, not openSettings).
 vi.mock('@immediately-run/sdk', () => ({ openSettings: vi.fn() }));
 
-import { createConversationStore, coherentFoldSeq, deriveTitle } from './conversationStore';
+import { createConversationStore, createConversationWithModel, coherentFoldSeq, deriveTitle } from './conversationStore';
 import { LEASE_HEARTBEAT_MS, LEASE_TTL_MS, parseLease } from './lease';
 import { MemFs } from './testing/memStoreFs';
 import type { Conversation } from './conversationModel';
@@ -25,18 +25,53 @@ describe('conversationStore — durable file-per-conversation store (Phase 01)',
     expect(back?.messages).toEqual([]);
   });
 
-  it('a saved per-conversation model choice round-trips — it shows after a remount (R3-620)', async () => {
-    // The choice belongs to the record, so the store's whole-record save/load
-    // carries it: after the region remounts, the picker re-reads it. A cleared
-    // choice (model: undefined) persists as absent, never as a stale pair.
-    const s = store(new MemFs());
-    const made = await s.create();
+  it('setModel stores the per-conversation choice, and a second store over the same files reads it back (R3-620)', async () => {
+    const fs = new MemFs();
+    const first = store(fs);
+    const made = await first.create('kept title');
     const pair = { providerId: 'llm.chat.anthropic', model: 'claude-x' };
-    await s.save({ ...made, model: pair });
-    expect((await s.load(made.id))?.model).toEqual(pair);
-    const cleared = await s.load(made.id);
-    await s.save({ ...cleared!, model: undefined });
-    expect((await s.load(made.id))?.model).toBeUndefined();
+    expect((await first.setModel(made.id, pair))?.model).toEqual(pair);
+    // What a remounted region sees: a fresh store over the same files.
+    const second = store(fs);
+    expect((await second.load(made.id))?.model).toEqual(pair);
+    // Clearing persists as absent, never as a stale pair.
+    expect((await second.setModel(made.id, null))?.model).toBeUndefined();
+    expect((await store(fs).load(made.id))?.model).toBeUndefined();
+  });
+
+  it('setModel patches the stored record: a transcript saved since the caller last read it survives', async () => {
+    const s = store(new MemFs());
+    const made = await s.create('t');
+    // Another window folds a turn in after `made` was read.
+    await s.save({ ...made, messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] });
+    await s.setModel(made.id, { providerId: 'llm.chat.anthropic', model: 'claude-x' });
+    const after = await s.load(made.id);
+    expect(after?.messages).toHaveLength(1);
+    expect(after?.title).toBe('t');
+    expect(after?.model).toEqual({ providerId: 'llm.chat.anthropic', model: 'claude-x' });
+  });
+
+  it('setModel on a conversation that is gone resolves null and creates nothing', async () => {
+    const s = store(new MemFs());
+    expect(await s.setModel('missing-id', { providerId: 'p', model: 'm' })).toBeNull();
+    expect(await s.list()).toEqual([]);
+  });
+
+  it('createConversationWithModel: a choice made before the record existed is on the stored record', async () => {
+    const fs = new MemFs();
+    const pair = { providerId: 'llm.chat.anthropic', model: 'claude-x' };
+    const made = await createConversationWithModel(store(fs), { repo: 'alice/notes', repoProvider: 'github', model: pair });
+    expect(made.model).toEqual(pair);
+    const reread = await store(fs).load(made.id);
+    expect(reread?.model).toEqual(pair);
+    expect(reread?.repo).toBe('alice/notes');
+    expect(reread?.repoProvider).toBe('github');
+  });
+
+  it('createConversationWithModel: no choice → a plain record with no model field', async () => {
+    const fs = new MemFs();
+    const made = await createConversationWithModel(store(fs), { repo: 'alice/notes' });
+    expect((await store(fs).load(made.id))?.model).toBeUndefined();
   });
 
   it('list returns newest-first and skips a corrupt file', async () => {

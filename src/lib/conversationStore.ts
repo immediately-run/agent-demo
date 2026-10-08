@@ -198,6 +198,11 @@ export interface ConversationStore {
   save(conv: Conversation): Promise<Conversation>;
   /** Set a conversation's title (no-op if missing). */
   rename(id: string, title: string): Promise<void>;
+  /** Set (or with `null`, clear) a conversation's per-conversation model choice.
+   *  Loads the stored record and patches that one field, so a caller's older
+   *  in-memory copy cannot overwrite the transcript. Returns the persisted
+   *  record, or `null` when the conversation is gone. */
+  setModel(id: string, model: NonNullable<Conversation['model']> | null): Promise<Conversation | null>;
   /** Delete a conversation and its journal (no-op if missing). */
   remove(id: string): Promise<void>;
   // ---- R3-559: the two-tier checkpoint journal (AGENT_RUN_DURABILITY_SPEC §4) ----
@@ -960,6 +965,12 @@ export function createConversationStore(opts: {
       if (conv) await save({ ...conv, title });
     },
 
+    async setModel(id, model) {
+      const conv = await load(id);
+      if (!conv) return null;
+      return save({ ...conv, model: model ?? undefined });
+    },
+
     async remove(id) {
       try {
         await p.unlink(file(id));
@@ -1055,4 +1066,18 @@ export async function openConversationStore(): Promise<ConversationStore> {
     fs: fs.promises as unknown as StoreFs,
     tabId: documentTabId(),
   });
+}
+
+/**
+ * Create a conversation that starts with a model choice the user made before
+ * its record existed (R3-620) — the stage creates the record at the first run's
+ * kickoff, and the picker is usable before that.
+ */
+export async function createConversationWithModel(
+  store: Pick<ConversationStore, 'create' | 'setModel'>,
+  init: { repo?: string; repoProvider?: string; model?: Conversation['model'] },
+): Promise<Conversation> {
+  const conv = await store.create(undefined, init.repo, init.repoProvider);
+  if (!init.model) return conv;
+  return (await store.setModel(conv.id, init.model)) ?? conv;
 }

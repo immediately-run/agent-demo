@@ -26,7 +26,8 @@ export interface HostModelView {
   /**
    * What `chat()` with no pair would run: the resolved provider + the tier model
    * (the request's `modelHint: 'smart'`, resolved host-side). `null` when no
-   * provider resolves at all (the SDK's `not-configured`).
+   * host names no default model (no provider resolves, or the host sent no
+   * tier models).
    */
   default: ConversationModelPair | null;
   /**
@@ -40,7 +41,7 @@ export interface HostModelView {
 
 /** The resolution: what this conversation's next `chat()` runs, and why. */
 export interface ConversationModelResolution {
-  /** The resolved pair — `null` when no provider resolves at all. */
+  /** The resolved pair — `null` when the host names no default model. */
   model: ConversationModelPair | null;
   /** Whether the pair came from the record's explicit choice or the host default. */
   source: 'record' | 'default';
@@ -49,8 +50,8 @@ export interface ConversationModelResolution {
 /**
  * Resolve what this conversation's next `chat()` runs.
  *
- *  - a record with NO stored choice → the host default (absent ⇒ `null`: no
- *    provider, the run surfaces the host's own connect path);
+ *  - a record with NO stored choice → the host default (`null` when the host
+ *    names none; the run then surfaces the host's own connect path);
  *  - a stored choice whose provider is STILL connected → the stored pair;
  *  - a stored choice whose provider has since been disconnected → the host
  *    default, so the conversation keeps running on what the user still holds.
@@ -90,4 +91,26 @@ export function runModelFor(
 ): ConversationModelPair | undefined {
   const resolved = resolveConversationModel(conv ?? {}, toHostModelView(ps));
   return resolved.source === 'record' && resolved.model ? resolved.model : undefined;
+}
+
+/** The provider features a run sizes itself by. */
+export interface RunFeatures {
+  /** The context window compaction budgets against; absent = unknown, no budget. */
+  contextWindow?: number;
+  /** Whether image parts may be sent. */
+  vision: boolean;
+}
+
+/**
+ * The features for a run on `runModel`. The host describes the features of the
+ * default provider only, so they apply when the run uses that provider. A run on
+ * another provider gets the conservative answer — no image parts, no context
+ * budget — because sizing it by the default provider's numbers would be wrong
+ * in either direction.
+ */
+export function runFeaturesFor(runModel: ConversationModelPair | undefined, ps: ChatProviderState): RunFeatures {
+  const info = ps.status === 'configured' ? ps.provider : null;
+  if (!info) return { vision: false };
+  if (runModel && runModel.providerId !== info.providerId) return { vision: false };
+  return { contextWindow: info.features.maxContextTokens, vision: info.features.vision === true };
 }
