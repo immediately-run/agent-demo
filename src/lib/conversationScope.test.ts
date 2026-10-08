@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // doesn't load the full SDK (these tests use the fs-injected core, not openSettings).
 vi.mock('@immediately-run/sdk', () => ({ openSettings: vi.fn() }));
 
-import { scopeConversations } from './conversationScope';
+import { repoCoordinatesOf, scopeConversations } from './conversationScope';
 import { createConversationStore } from './conversationStore';
 import { MemFs } from './testing/memStoreFs';
 import type { ConversationMeta } from './conversationModel';
@@ -61,5 +61,63 @@ describe('conversation repo stamping', () => {
     await store.save({ ...legacy, repo: legacy.repo ?? 'acme/app' }); // the stage's save rule
     const reloaded = await createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' }).load(legacy.id);
     expect(reloaded?.repo).toBe('acme/app');
+  });
+});
+
+// ── R3-848 — the group carries the newest member's provider stamp ────────────
+describe("RepoGroup.provider (R3-848)", () => {
+  const meta = (id: string, repo: string | undefined, repoProvider?: string) => ({
+    id,
+    title: id,
+    createdAt: 1,
+    updatedAt: 1,
+    ...(repo ? { repo, ...(repoProvider ? { repoProvider } : {}) } : {}),
+  });
+  it("a group formed from a stamped member carries its provider", () => {
+    const { others } = scopeConversations([meta("a", "other/repo", "github")], "mine/repo");
+    expect(others).toHaveLength(1);
+    expect(others[0].provider).toBe("github");
+  });
+  it("a legacy group (no member stamped) carries none — the row defaults, honestly", () => {
+    const { others } = scopeConversations([meta("a", "old/repo")], "mine/repo");
+    expect(others).toHaveLength(1);
+    expect(others[0].provider).toBeUndefined();
+  });
+});
+
+// ── R3-848 — repoCoordinatesOf: the shape class, and never a guess ───────────
+describe("repoCoordinatesOf (R3-848)", () => {
+  const g = (repo: string, provider?: string) => ({ repo, count: 1, updatedAt: 1, ...(provider ? { provider } : {}) });
+  it("a stamped group splits its label at the first slash", () => {
+    expect(repoCoordinatesOf(g("other/repo", "github"))).toEqual({
+      provider: "github",
+      namespace: "other",
+      repository: "repo",
+    });
+  });
+  it("a deeper label keeps the rest in the repository (only the first slash splits)", () => {
+    expect(repoCoordinatesOf(g("a/b/c", "github"))).toEqual({
+      provider: "github",
+      namespace: "a",
+      repository: "b/c",
+    });
+  });
+  it("a label with no slash, a leading slash, or an empty repository is refused (null)", () => {
+    expect(repoCoordinatesOf(g("noslash", "github"))).toBeNull();
+    expect(repoCoordinatesOf(g("/leading", "github"))).toBeNull();
+    expect(repoCoordinatesOf(g("a/", "github"))).toBeNull();
+  });
+  it("an unstamped group is refused — the provider is never guessed", () => {
+    expect(repoCoordinatesOf(g("other/repo"))).toBeNull();
+  });
+  it("a merge prefers a defined stamp: a legacy creator never pins a stamped joiner", () => {
+    const { others } = scopeConversations(
+      [
+        { id: "legacy", title: "l", createdAt: 2, updatedAt: 2, repo: "r/x" },
+        { id: "stamped", title: "s", createdAt: 1, updatedAt: 1, repo: "r/x", repoProvider: "github" },
+      ],
+      "mine/x",
+    );
+    expect(others[0]?.provider).toBe("github");
   });
 });

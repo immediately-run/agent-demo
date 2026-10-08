@@ -12,6 +12,7 @@
 // `provider-not-connected`, so resolving it away here is the honest degraded
 // state, not a silent substitution: what answers is the default, visibly).
 
+import type { ChatProviderState } from '@immediately-run/sdk';
 import type { Conversation } from './conversationModel';
 
 /** A concrete provider-and-model pair — the shape `chat()`'s `model` field takes. */
@@ -63,4 +64,30 @@ export function resolveConversationModel(
     return { model: { providerId: stored.providerId, model: stored.model }, source: 'record' };
   }
   return { model: host.default, source: 'default' };
+}
+
+/**
+ * The host's provider state → the view the resolution reads. One derivation for
+ * the picker's render and for every run's kickoff, so what the picker shows and
+ * what the run sends cannot drift apart.
+ */
+export function toHostModelView(ps: ChatProviderState): HostModelView {
+  const info = ps.status === 'configured' ? ps.provider : null;
+  return {
+    default: info?.models !== undefined ? { providerId: info.providerId, model: info.models.smart } : null,
+    connectedProviderIds: info?.connectedProviders?.map((c) => c.providerId) ?? [],
+  };
+}
+
+/**
+ * The pair a run's `chat()` carries, or `undefined` for the host-resolved
+ * default. Only a choice read from the record rides the request: the default
+ * stays host-side, so a Settings change applies without the app re-sending it.
+ */
+export function runModelFor(
+  conv: Pick<Conversation, 'model'> | null | undefined,
+  ps: ChatProviderState,
+): ConversationModelPair | undefined {
+  const resolved = resolveConversationModel(conv ?? {}, toHostModelView(ps));
+  return resolved.source === 'record' && resolved.model ? resolved.model : undefined;
 }

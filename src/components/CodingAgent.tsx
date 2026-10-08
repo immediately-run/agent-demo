@@ -11,7 +11,7 @@
 // resolves the user's preferred provider/model (AGENT_AUTHORING_ARCHITECTURE §3; H2
 // favours chat() over net:fetch+secrets). Needs only the `llm:chat` capability.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCatalog, useMounts, getAppMountPath, describeChat } from "@immediately-run/sdk";
+import { useCatalog, useMounts, getAppMountPath, describeChat, describeChatState, hostFetch } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
@@ -20,6 +20,7 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
+import { runModelFor } from "../lib/resolveConversationModel";
 import { runAgent, type LoopBoundary } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -100,7 +101,15 @@ export default function CodingAgent() {
   // tools this run actually got, so selection needs the merged list.
   const { toolset, skills } = useMemo(() => {
     const { root, readOnly } = resolveWorkingTreeMount(mounts, getAppMountPath());
-    const fsTools = createFsToolset({ root, readOnly, vision });
+    // R3-862 — the download tool is offered only when the catalog carries
+    // `fetch:fetch` (fsTools decides) and the transport is the host's bytes fetch.
+    const fsTools = createFsToolset({
+      root,
+      readOnly,
+      vision,
+      catalog,
+      fetchBytes: (url) => hostFetch(url, { responseType: "bytes" }),
+    });
     const projectTools = createProjectToolset({ root, readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
@@ -197,7 +206,9 @@ export default function CodingAgent() {
     const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(),
+        // The adopted conversation keeps the model the user chose for it in the
+        // stage; in a frame without the connected set the choice resolves away.
+        client: createChatModelClient(runModelFor(convRef.current, describeChatState())),
         tools: toolset.tools,
         execute: toolset.execute,
         system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot, today: todayIso() }),

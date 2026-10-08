@@ -189,10 +189,13 @@ describe('exit 3 — one non-matching entry applies NOTHING and says which', () 
   it('refuses an empty or malformed entry by number, before touching the file', async () => {
     const { fs, ts } = toolset();
     const before = fs.get('/app/src/App.tsx');
+    // R3-856: `edits: []` with no pair is the NEITHER-form refusal — the old
+    // "was empty" branch died with the empty-array fix (an empty array no longer
+    // takes the batch path), and this message is the honest one for no intent.
     for (const [edits, expected] of [
       [[{ old_string: '', new_string: 'x' }], 'edit 1'],
       [[{ old_string: 'useState(0)', new_string: 'useState(0)' }], 'identical'],
-      [[], 'was empty'],
+      [[], 'requires a non-empty "old_string"'],
     ] as const) {
       const res = await ts.execute('edit_file', { path: 'src/App.tsx', edits });
       expect(res.isError).toBe(true);

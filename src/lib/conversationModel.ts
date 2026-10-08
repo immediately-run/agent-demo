@@ -38,6 +38,15 @@ export interface ConversationMeta {
    * a conversation to a provider that is gone. Additive-optional (schema stays 1).
    */
   model?: { providerId: string; model: string };
+  /**
+   * The repo stamp's PROVIDER (R3-848) — the workspace channel's `provider` at
+   * the save that stamped `repo` (the label carries only `namespace/repository`,
+   * and the label alone cannot say which provider the repo lives under).
+   * Additive-optional beside `repo`: the row that opens the repository passes
+   * it to `openRepository()` rather than guessing, and a legacy record without
+   * it predates the stamp.
+   */
+  repoProvider?: string;
 }
 
 /** The full stored record (one JSON file per conversation). */

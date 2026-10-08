@@ -441,11 +441,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font: var(--label);
+  font-size: 12px;
   color: var(--ink-2);
 }
 .ca-model-select {
-  font: var(--label);
+  font: inherit;
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);

@@ -15,6 +15,7 @@ import {
   describeChat,
   describeChatState,
   useChatProviderState,
+  hostFetch,
 } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, findConferredWorktree } from "../lib/fsTools";
@@ -24,7 +25,7 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildPinnedPrefix, buildLiveSuffix, composeSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
-import { resolveConversationModel, type HostModelView } from "../lib/resolveConversationModel";
+import { runModelFor, toHostModelView } from "../lib/resolveConversationModel";
 import { runAgent, type RunState } from "../lib/agentLoop";
 import { createRunPause } from "../lib/runPause";
 import { SteerController, INTERRUPTED_TURN_TEXT, type SteerMessage, type SteerMode } from "../lib/steering";
@@ -176,14 +177,7 @@ export default function ConversationStage() {
   // frame because it holds the ELEVATED `llm:chooseModel` capability — the
   // panel and any stage app see it stripped, and the picker stays absent).
   const providerState = useChatProviderState();
-  const hostModelView = useMemo<HostModelView>(() => {
-    const info = providerState.status === "configured" ? providerState.provider : null;
-    return {
-      default:
-        info?.models !== undefined ? { providerId: info.providerId, model: info.models.smart } : null,
-      connectedProviderIds: info?.connectedProviders?.map((c) => c.providerId) ?? [],
-    };
-  }, [providerState]);
+  const hostModelView = useMemo(() => toHostModelView(providerState), [providerState]);
   // The connected choices for the picker (undefined when this frame holds no
   // `llm:chooseModel` — the picker then renders nothing).
   const connectedChoices = useMemo(
@@ -191,17 +185,6 @@ export default function ConversationStage() {
       providerState.status === "configured" ? providerState.provider.connectedProviders : undefined,
     [providerState],
   );
-  // Runs read the live state at kickoff, not the render-time memo — a provider
-  // change mid-session must apply to the next run without a remount.
-  const hostModelViewAtRun = useCallback((): HostModelView => {
-    const ps = describeChatState();
-    const info = ps.status === "configured" ? ps.provider : null;
-    return {
-      default:
-        info?.models !== undefined ? { providerId: info.providerId, model: info.models.smart } : null,
-      connectedProviderIds: info?.connectedProviders?.map((c) => c.providerId) ?? [],
-    };
-  }, []);
   // R3-620 — store the user's per-conversation choice on the RECORD (absent =
   // the Settings default). The run in flight keeps its own resolved pair; the
   // choice applies to the next run.
@@ -231,7 +214,13 @@ export default function ConversationStage() {
     // `withSkills` offers nothing and `load_skill` is absent — the authoring skills
     // would be advice the agent cannot act on (R3-331).
     if (!stageTree) return withSkills(catalogToolset(catalog));
-    const fsTools = createFsToolset({ root: stageTree.root, readOnly: stageTree.readOnly, vision });
+    const fsTools = createFsToolset({
+      root: stageTree.root,
+      readOnly: stageTree.readOnly,
+      vision,
+      catalog,
+      fetchBytes: (url) => hostFetch(url, { responseType: "bytes" }),
+    });
     const projectTools = createProjectToolset({ root: stageTree.root, readOnly: stageTree.readOnly });
     const diagnosticsTools = createDiagnosticsToolset();
     // R3-332: git-READ over the same working tree. Empty (and therefore invisible to
@@ -359,7 +348,13 @@ export default function ConversationStage() {
   // conversation lands under "Other repositories" — which is the R3-475 bug, just
   // arrived by a different route. `stageTree` stays what it is actually for: the
   // filesystem root the agent authors.
-  const workspaceRepo = useWorkspace()?.label;
+  const workspace = useWorkspace();
+  const workspaceRepo = workspace?.label;
+  // The stamp's PROVIDER half (R3-848): the label alone cannot say which
+  // provider the repo lives under, and the other-repositories row that opens a
+  // repo passes coordinates, never a guess. Stamped beside the label at every
+  // site the label is stamped.
+  const workspaceProvider = workspace?.provider;
 
   // Readable from the boot effect below without re-running it when the workspace
   // arrives (the effect opens the store ONCE; the fallback simply uses whatever repo
@@ -491,7 +486,7 @@ export default function ConversationStage() {
     let conv = convRef.current;
     if (!conv && store) {
       try {
-        conv = await store.create(undefined, workspaceRepo);
+        conv = await store.create(undefined, workspaceRepo, workspaceProvider);
         convRef.current = conv;
         stageSelectionRef.current!.adopt(conv);
         setTitle(conv.title);
@@ -563,12 +558,10 @@ export default function ConversationStage() {
     // R3-620 — the per-conversation choice, resolved at kickoff from the record
     // against the LIVE connected set (a stale record cannot pin a gone provider);
     // a pair from the record rides the chat request, the default stays host-side.
-    const resolvedModel = resolveConversationModel(convRef.current ?? {}, hostModelViewAtRun());
+    const runModel = runModelFor(convRef.current, describeChatState());
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(
-          resolvedModel.source === "record" ? resolvedModel.model ?? undefined : undefined,
-        ),
+        client: createChatModelClient(runModel),
         tools: toolset.tools,
         execute: toolset.execute,
         system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
@@ -661,6 +654,7 @@ export default function ConversationStage() {
             messages: transcript,
             title: newTitle,
             repo: conv.repo ?? workspaceRepo,
+            ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
           });
           setTitle(newTitle);
           setStoreError(null);
@@ -789,12 +783,10 @@ export default function ConversationStage() {
     const pinnedPrefix = replay.systemPrefix ?? buildPinnedPrefix({ today: todayIso() });
     // R3-620 — the same resolution as a fresh run: a resumed conversation keeps
     // its chosen model, or falls back to the default when that provider is gone.
-    const resolvedModel = resolveConversationModel(convRef.current ?? {}, hostModelViewAtRun());
+    const runModel = runModelFor(convRef.current, describeChatState());
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(
-          resolvedModel.source === "record" ? resolvedModel.model ?? undefined : undefined,
-        ),
+        client: createChatModelClient(runModel),
         tools: toolset.tools,
         execute: toolset.execute,
         system: composeSystemPrompt(pinnedPrefix, buildLiveSuffix({ tools: toolset.tools, workspaceRoot: stageTree?.root, skills })),
@@ -851,6 +843,7 @@ export default function ConversationStage() {
         convRef.current = await store.fold(conv.id, {
           messages: transcript,
           repo: conv.repo ?? workspaceRepo,
+          ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
         });
         setStoreError(null);
         publisherRef.current?.onSaved();
@@ -909,6 +902,7 @@ export default function ConversationStage() {
       convRef.current = await store.fold(conv.id, {
         messages: repaired.messages,
         repo: conv.repo ?? workspaceRepo,
+        ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
       });
       setLog(messagesToLog(repaired.messages));
       setStoreError(null);
@@ -942,6 +936,7 @@ export default function ConversationStage() {
           stored={convModel}
           host={hostModelView}
           connected={connectedChoices}
+          disabled={running}
           onChoose={(pair) => void chooseModel(pair)}
         />
         <span className="ca-sub">

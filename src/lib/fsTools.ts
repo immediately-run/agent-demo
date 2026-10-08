@@ -14,6 +14,8 @@
 import fs from 'fs';
 import type { ImageBlock, ToolExecutor, ToolOutcome } from './agentLoop';
 import type { Toolset } from './toolset';
+import { normalizeGrepFlags, ignoredFlagsNote } from './grepFlags';
+import { isDisposalConstantMessage, unwrapSuppressed } from './storeError';
 
 /** The slice of `fs.promises` these tools use — narrowed so tests can inject an
  *  in-memory fake without pulling in the whole node surface. */
@@ -125,6 +127,21 @@ export interface FsToolsOptions {
    * must not gamble the user's request on a guess.
    */
   vision?: boolean;
+  /**
+   * R3-862 — `download_file` is offered only when the app's catalog carries
+   * `fetch:fetch` (the host's `net:fetch` capability backs it) AND the byte
+   * transport is wired. The structural shape keeps this module host-free (the
+   * SDK's dist does not import under a bare unit runner).
+   */
+  catalog?: readonly { name: string }[];
+  /** The `hostFetch(url, { responseType: 'bytes' })` adapter, injected so the
+   *  tool's tests mock the wire. */
+  fetchBytes?: (url: string) => Promise<{
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    bodyBytes?: Uint8Array;
+  }>;
 }
 
 type ToolResult = ToolOutcome;
@@ -141,11 +158,13 @@ const IMAGE_CAP = 1_500 * 1024;
  * Image types the transport can carry, mirroring the SDK's `mimeTypeFor` table.
  *
  * WHY A LOCAL COPY rather than importing `mimeTypeFor` from `@immediately-run/sdk`:
- * this module is deliberately dependency-light so it unit-tests without a host — every
- * suite that touches it (and `projectTools`, which shares its types) would otherwise
- * have to mock the whole SDK barrel to exercise a path lookup. Eleven lines of table is
- * the cheaper honesty. `mimeTypeFor` is the source it mirrors; `imageMime.test.ts`
- * pins the agreement.
+ * the SDK's published dist cannot be imported by a bare unit runner at all (its
+ * internal specifiers resolve only under a bundler), and this module is deliberately
+ * dependency-light so it unit-tests without a host. `mimeTypeFor` is the source this
+ * mirrors — BY INSPECTION, not by a test pin: no test can import the other side, so
+ * when the SDK's table changes, this one is re-read by hand. The table is exported
+ * (`BINARY_IMAGE_EXTENSIONS`) and the write_file refusal test derives its cases from
+ * it, so at least the COPY cannot drift from what this module enforces.
  *
  * `.svg` is deliberately ABSENT even though the SDK's table names it — see `read_file`.
  */
@@ -166,6 +185,10 @@ export function imageMimeFor(path: string): string | undefined {
   if (dot === -1) return undefined;
   return IMAGE_MIME_BY_EXT[path.slice(dot + 1).toLowerCase()];
 }
+
+/** Every extension `write_file` refuses text into — derived from the MIME table,
+ *  so the refusal and the transport's image grammar are ONE list (R3-856). */
+export const BINARY_IMAGE_EXTENSIONS: readonly string[] = Object.keys(IMAGE_MIME_BY_EXT);
 const LIST_CAP = 1000; // entries from list_dir
 const MATCH_CAP = 200; // glob paths / grep hits
 const WALK_CAP = 5000; // files visited by a glob/grep walk
@@ -227,12 +250,23 @@ const message = (e: unknown): string => (e as Error)?.message ?? String(e);
 
 /** Map a thrown fs error to a model-readable result (no chroot disclosure). */
 function fsError(e: unknown): ToolResult {
-  const c = code(e);
-  if (c === 'ENOENT') return { content: 'not found', isError: true };
-  if (c === 'EROFS' || c === 'EACCES' || c === 'EPERM') return { content: 'read-only: this mount cannot be written', isError: true };
-  if (c === 'EISDIR') return { content: 'that path is a directory, not a file', isError: true };
-  if (c === 'ENOTDIR') return { content: 'a path segment is a file, not a directory', isError: true };
-  return { content: `${c ?? 'error'}: ${message(e)}`, isError: true };
+  // R3-1026 — a ZenFS SuppressedError's own message is the useless constant
+  // "An error was suppressed during disposal."; the real cause rides
+  // .suppressed/.error. Unwrap first (the one unwrapper home is storeError's):
+  // the chain leads with the innermost cause, so the first code-bearing entry
+  // wins, and a code-less chain surfaces the innermost MESSAGE — never the
+  // constant — so the model and the transcript see the real failure.
+  const chain = unwrapSuppressed(e);
+  for (const cause of chain) {
+    const c = code(cause);
+    if (c === 'ENOENT') return { content: 'not found', isError: true };
+    if (c === 'EROFS' || c === 'EACCES' || c === 'EPERM') return { content: 'read-only: this mount cannot be written', isError: true };
+    if (c === 'EISDIR') return { content: 'that path is a directory, not a file', isError: true };
+    if (c === 'ENOTDIR') return { content: 'a path segment is a file, not a directory', isError: true };
+    if (c) return { content: `${c}: ${message(cause)}`, isError: true };
+  }
+  const inner = chain.map(message).find((m) => !isDisposalConstantMessage(m));
+  return { content: `error: ${inner ?? message(e)}`, isError: true };
 }
 
 const notFound: ToolResult = { content: 'not found', isError: true };
@@ -356,6 +390,10 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
   const p: FsPortLike = opts.fs ?? (fs.promises as unknown as FsPortLike);
   const readOnly = opts.readOnly ?? false;
   const vision = opts.vision ?? false;
+  // R3-862: the ONE predicate for offering `download_file` (catalog grant + wired
+  // transport) — the listing AND the write_file refusal read it, so a refusal
+  // never names a tool the model was not given (review round 1, both reviewers).
+  const downloadOffered = Boolean(opts.fetchBytes && opts.catalog?.some((m) => m.name === 'fetch:fetch'));
 
   const rel = (abs: string): string => {
     const r = abs === root ? '' : abs.slice(root.length + 1);
@@ -512,6 +550,20 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
       const abs = resolveWithin(root, String(input.path ?? ''));
       if (!abs) return notFound;
+      // R3-856 — text into an image path is the failed-fetch failure mode: after a
+      // fetch error the model wrote the URL string into posters/avatar.jpg and the
+      // poster broke with no error until a human looked. The image table is the ONE
+      // home (`imageMimeFor`; `.svg` is deliberately absent — it is text).
+      if (imageMimeFor(abs) !== undefined) {
+        return {
+          // R3-862: the URL case finally has its own tool — name it WHEN it was
+          // listed (the catalog may not carry fetch:fetch; absent, not fake).
+          content: downloadOffered
+            ? `write_file writes text; to add an image from a URL, download_file it; to reuse an existing asset, copy_file it`
+            : `write_file writes text; to add an image, copy an existing asset with copy_file`,
+          isError: true,
+        };
+      }
       const content = typeof input.content === 'string' ? input.content : String(input.content ?? '');
       try {
         const slash = abs.lastIndexOf('/');
@@ -537,7 +589,17 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
       // `old_string`/`new_string` pair is kept because it is the right shape for a
       // one-site change and the prompt already teaches it. Both go through the same
       // planner, so the batch of one and the single pair cannot diverge.
-      const batch = Array.isArray(input.edits) ? (input.edits as unknown[]) : null;
+      // R3-856 — an EMPTY `edits[]` carries no intent, so it does not take the batch
+      // path: models fill every schema field and sent `edits: []` beside a complete
+      // pair, and the empty-array refusal then threw away four valid edits in one
+      // session. The pair wins when it is complete; only a NON-EMPTY batch is a batch.
+      const hasPair =
+        (typeof input.old_string === 'string' && input.old_string !== '') ||
+        (typeof input.new_string === 'string' && input.new_string !== '');
+      const batch = Array.isArray(input.edits) && input.edits.length > 0 ? (input.edits as unknown[]) : null;
+      if (batch && hasPair) {
+        return { content: 'pass either old_string/new_string or edits, not both', isError: true };
+      }
       const specs: EditSpec[] = batch
         ? batch.map((e) => {
             const o = (e ?? {}) as Record<string, unknown>;
@@ -554,9 +616,6 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
               replace_all: input.replace_all === true,
             },
           ];
-      if (batch && specs.length === 0) {
-        return { content: 'edit_file "edits" was empty — supply at least one { old_string, new_string }', isError: true };
-      }
       if (!batch && !specs[0].old_string) {
         return { content: 'edit_file requires a non-empty "old_string" (or an "edits" array)', isError: true };
       }
@@ -631,11 +690,16 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     async grep(input) {
       const pattern = String(input.pattern ?? '');
       if (!pattern) return { content: 'grep requires a "pattern"', isError: true };
+      // R3-856 — flags are normalised, never passed through: "n" is grep's
+      // line-number flag (always on here), g/y are stateful with re.test and
+      // would silently skip matches. The note teaches the grammar in-band.
+      const { flags, ignored } = normalizeGrepFlags(typeof input.flags === 'string' ? input.flags : '');
+      const note = ignoredFlagsNote(ignored);
       let re: RegExp;
       try {
-        re = new RegExp(pattern, typeof input.flags === 'string' ? input.flags : '');
+        re = new RegExp(pattern, flags);
       } catch (e) {
-        return { content: `invalid regex: ${message(e)}`, isError: true };
+        return { content: `invalid regex: ${message(e)}${note}`, isError: true };
       }
       const start = resolveWithin(root, String(input.path ?? '.'));
       if (!start) return notFound;
@@ -655,7 +719,8 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
           if (re.test(lines[i])) hits.push(`${rel(abs)}:${i + 1}: ${lines[i].slice(0, 300)}`);
         }
       }
-      return { content: hits.length ? hits.join('\n') : '(no matches)' };
+      const trailing = note ? '\n' + note.trim() : '';
+      return { content: (hits.length ? hits.join('\n') : '(no matches)') + trailing };
     },
 
     // R3-338 — move/copy/replace: the refactoring primitives. The port already had
@@ -739,8 +804,10 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
           await p.writeFile(abs, text.split(oldStr).join(newStr));
         } catch (e) {
           // Report what already changed rather than pretending the whole run failed.
+          // R3-1026: fsError here too — a SuppressedError from this write would
+          // otherwise reach the model as the disposal constant.
           const partial = changed.map((c) => `${c.path}: ${c.sites}`).join('\n');
-          return { content: `failed writing ${r}: ${message(e)}\nchanged so far:\n${partial}`, isError: true };
+          return { content: `failed writing ${r}: ${fsError(e).content}\nchanged so far:\n${partial}`, isError: true };
         }
       }
       if (changed.length === 0) return { content: '(no matches)' };
@@ -766,6 +833,56 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
         return fsError(e);
       }
     },
+
+    // R3-862 — bytes from the network straight into the workspace, without the
+    // bytes entering the model's context (the movie-night-report failure: the
+    // model wrote the poster's URL string into avatar.jpg). Only the one-line
+    // result reaches the model.
+    async download_file(input) {
+      if (readOnly) return { content: 'read-only: this mount cannot be written', isError: true };
+      const fetchBytes = opts.fetchBytes;
+      if (!fetchBytes) return { content: 'forbidden: this app has no net:fetch grant to fetch with', isError: true };
+      const url = String(input.url ?? '');
+      const to = resolveWithin(root, String(input.path ?? ''));
+      if (!url) return { content: 'download_file requires a "url"', isError: true };
+      if (!to) return notFound;
+      try {
+        // Every check BEFORE the write — a failure never leaves a partial file.
+        if (input.overwrite !== true && (await exists(to))) {
+          return { content: `${rel(to)} already exists — pass overwrite: true to replace it`, isError: true };
+        }
+        let res;
+        try {
+          res = await fetchBytes(url);
+        } catch (e) {
+          // A host refusal carries a machine `.code` (forbidden/blocked/invalid/
+          // redirect/too-large/network) — pass it through, naming the fix for the
+          // one the user can act on. `too-large` is the host's cap, relayed (R19).
+          const c = code(e);
+          if (c === 'forbidden') {
+            return { content: `forbidden: this host is not in the app's net:fetch allowlist — ${message(e)}`, isError: true };
+          }
+          return { content: `${c ?? 'error'}: ${message(e)}`, isError: true };
+        }
+        if (res.status < 200 || res.status >= 300) {
+          return { content: `the server answered ${res.status}`, isError: true };
+        }
+        const contentType = Object.entries(res.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? 'unknown';
+        const bytes = res.bodyBytes;
+        if (!bytes) return { content: 'error: the host returned no bytes (responseType: bytes)', isError: true };
+        // A page saved as ".jpg" is the corruption this tool exists to prevent —
+        // an image-named path requires image/* bytes.
+        if (imageMimeFor(to) !== undefined && !contentType.toLowerCase().startsWith('image/')) {
+          return { content: `the URL returned ${contentType}, not an image`, isError: true };
+        }
+        const slash = to.lastIndexOf('/');
+        if (slash > 0) await p.mkdir(to.slice(0, slash), { recursive: true });
+        await p.writeFile(to, bytes);
+        return { content: `saved ${bytes.length} bytes (${contentType}) to ${rel(to)}` };
+      } catch (e) {
+        return fsError(e);
+      }
+    },
   };
 
   const obj = (props: Record<string, unknown>): { type: 'object'; properties: Record<string, unknown>; additionalProperties: boolean } => ({
@@ -782,11 +899,27 @@ export function createFsToolset(opts: FsToolsOptions): Toolset {
     { name: 'list_dir', description: 'List a workspace directory (directories first). Omit `path` for the workspace root.', input_schema: obj({ path: str('Workspace-relative directory (default: root).') }) },
     { name: 'stat', description: 'Stat a workspace path: returns its type, size, and mtime.', input_schema: obj({ path: str('Workspace-relative path.') }) },
     { name: 'glob', description: 'Find workspace files matching a glob (`**`, `*`, `?`), e.g. "src/**/*.ts".', input_schema: obj({ pattern: str('Glob pattern, workspace-relative.') }) },
-    { name: 'grep', description: 'Search workspace file contents with a JS regex. Returns `path:line: text` hits.', input_schema: obj({ pattern: str('JS regular expression.'), path: str('Subtree to search (default: root).'), flags: str('Regex flags, e.g. "i".') }) },
+    { name: 'grep', description: 'Search workspace file contents with a JS regex. Returns `path:line: text` hits.', input_schema: obj({ pattern: str('JS regular expression.'), path: str('Subtree to search (default: root).'), flags: str('JS RegExp flags: i (ignore case), m, s, u. Line numbers are always included; this is not grep\'s command-line flags.') }) },
     { name: 'move_file', description: 'Move or RENAME a workspace file in one call — the content never passes through you, so prefer this over read + write + delete. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
     { name: 'copy_file', description: 'Copy a workspace file byte-for-byte — safe for images and other binary assets, which a read-then-write through text would corrupt. Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.', input_schema: obj({ from: str('Workspace-relative source path.'), to: str('Workspace-relative destination path.'), overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' } }) },
     { name: 'replace_in_files', description: 'Replace an exact literal string across many files — the tool for renaming a symbol project-wide. Scope it with `path` and/or `glob`. Reports WHICH files changed and how many sites in each. Run it with `dry_run: true` first to see the blast radius, and read the result back with a diff before proposing it.', input_schema: obj({ old_string: str('Exact literal text to replace (not a regex).'), new_string: str('Replacement text, inserted verbatim.'), path: str('Subtree to search (default: workspace root).'), glob: str('Only files whose workspace-relative path matches this glob, e.g. "src/**/*.ts".'), dry_run: { type: 'boolean', description: 'Report what WOULD change without writing anything (default false).' } }) },
     { name: 'delete_file', description: 'Delete a workspace file.', input_schema: obj({ path: str('Workspace-relative file path.') }) },
+    // R3-862: offered only when the app can actually fetch (the catalog carries
+    // `fetch:fetch`) and the transport is wired — absent rather than fake.
+    ...(downloadOffered
+      ? [
+          {
+            name: 'download_file',
+            description:
+              "Download a URL's bytes into a workspace file — use this for images and other binary assets; never write_file. The bytes never enter the conversation; you get one line back (size, content type, path). Parent directories are created. Refuses to clobber an existing file unless `overwrite` is set.",
+            input_schema: obj({
+              url: str('The URL to download (fetched by the host under the app’s net:fetch allowlist).'),
+              path: str('Workspace-relative destination path.'),
+              overwrite: { type: 'boolean', description: 'Replace the destination if it already exists (default false).' },
+            }),
+          },
+        ]
+      : []),
   ];
 
   const execute: ToolExecutor = async (name, input) => {

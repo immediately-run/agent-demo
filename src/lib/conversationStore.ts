@@ -96,6 +96,7 @@ export const metaOf = (conv: Conversation): ConversationMeta => ({
   createdAt: conv.createdAt,
   updatedAt: conv.updatedAt,
   repo: conv.repo,
+  repoProvider: conv.repoProvider,
 });
 
 /** The `fs.promises` subset the store uses — narrowed so tests inject a fake. */
@@ -190,7 +191,7 @@ export interface ConversationStore {
   list(): Promise<ConversationMeta[]>;
   /** Create, persist, and return a fresh empty conversation, stamped with the
    *  workspace repo when the caller knows it (R3-475). */
-  create(title?: string, repo?: string): Promise<Conversation>;
+  create(title?: string, repo?: string, repoProvider?: string): Promise<Conversation>;
   /** Load a conversation, or `null` if missing/corrupt. */
   load(id: string): Promise<Conversation | null>;
   /** Persist a conversation, bumping `updatedAt`; returns the persisted record. */
@@ -220,7 +221,10 @@ export interface ConversationStore {
    *  where R-ARD-5b's entry-size truncation is visible by design; the run-end
    *  fold with `patch.messages` is the fidelity-restoring write. Returns the
    *  persisted record. */
-  fold(convId: string, patch?: { messages?: ChatMessage[]; title?: string; repo?: string }): Promise<Conversation>;
+  fold(
+    convId: string,
+    patch?: { messages?: ChatMessage[]; title?: string; repo?: string; repoProvider?: string },
+  ): Promise<Conversation>;
   // ---- R3-561: the advisory run lease (AGENT_RUN_DURABILITY_SPEC §6) ----
   /** Try to take the run lease. `free` ⇒ this frame may execute, allocate `seq`
    *  and append; `held` ⇒ another frame's lease is still live and the caller
@@ -835,7 +839,7 @@ export function createConversationStore(opts: {
 
   const fold = async (
     id: string,
-    patch?: { messages?: ChatMessage[]; title?: string; repo?: string },
+    patch?: { messages?: ChatMessage[]; title?: string; repo?: string; repoProvider?: string },
   ): Promise<Conversation> => {
     // Serialized per conversation: the chained predecessor (if any) completes
     // first, so two folds can never write watermarks out of order.
@@ -852,14 +856,20 @@ export function createConversationStore(opts: {
 
   const foldNow = async (
     id: string,
-    patch?: { messages?: ChatMessage[]; title?: string; repo?: string },
+    patch?: { messages?: ChatMessage[]; title?: string; repo?: string; repoProvider?: string },
   ): Promise<Conversation> => {
     const conv = await load(id);
     if (!conv) throw errWithCode('ENOENT', `conversation ${id} not found`);
     let next: Conversation;
     if (!journalRoot) {
       // Journalless fold degrades to a plain save (R-ARD-10: allowed, surfaced).
-      next = { ...conv, ...(patch?.messages !== undefined ? { messages: patch.messages } : {}), ...(patch?.title !== undefined ? { title: patch.title } : {}), ...(patch?.repo !== undefined ? { repo: patch.repo } : {}) };
+      next = {
+        ...conv,
+        ...(patch?.messages !== undefined ? { messages: patch.messages } : {}),
+        ...(patch?.title !== undefined ? { title: patch.title } : {}),
+        ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
+        ...(patch?.repoProvider !== undefined ? { repoProvider: patch.repoProvider } : {}),
+      };
       return save(next);
     }
     const entries = await readEntries(id);
@@ -894,6 +904,10 @@ export function createConversationStore(opts: {
       foldedSeq: watermark,
       ...(patch?.title !== undefined ? { title: patch.title } : {}),
       ...(patch?.repo !== undefined ? { repo: patch.repo } : {}),
+      // R3-848 review round 1 (blocking): the journaled branch dropped the
+      // provider stamp, so the production two-tier path silently lost it and
+      // every record stayed "legacy" forever.
+      ...(patch?.repoProvider !== undefined ? { repoProvider: patch.repoProvider } : {}),
     };
     const saved = await save(next);
     // CLAMPED forward: appends that landed while the (synced-tier) record save
@@ -923,7 +937,7 @@ export function createConversationStore(opts: {
       return metas.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, LIST_CAP);
     },
 
-    async create(title, repo) {
+    async create(title, repo, repoProvider) {
       const now = Date.now();
       const conv: Conversation = {
         id: genId(),
@@ -932,7 +946,7 @@ export function createConversationStore(opts: {
         updatedAt: now,
         schema: 1,
         messages: [],
-        ...(repo ? { repo } : {}),
+        ...(repo ? { repo, ...(repoProvider ? { repoProvider } : {}) } : {}),
       };
       await write(conv); // createdAt === updatedAt for a fresh record
       return conv;

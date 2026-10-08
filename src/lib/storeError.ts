@@ -25,6 +25,12 @@ type MaybeSuppressed = {
 const isObj = (v: unknown): v is MaybeSuppressed =>
   typeof v === "object" && v !== null;
 
+/** The ZenFS/engine disposal constant — the one home for recognizing it (R3-1026
+ *  review: it was spelled in two modules). Anchored to the FULL constant: a real
+ *  cause whose message merely CONTAINS the phrase must not be mistaken for it. */
+export const isDisposalConstantMessage = (m: string): boolean =>
+  /^an error was suppressed during disposal\.?$/i.test(m.trim());
+
 /**
  * Flatten a (possibly nested) `SuppressedError` into the chain of underlying
  * errors, innermost causes first. A plain error yields itself.
@@ -65,7 +71,7 @@ export function describeStoreFailure(e: unknown, suffix = ""): string {
   for (const c of chain) {
     const l = label(c);
     if (!l || parts.includes(l)) continue;
-    if (chain.length > 1 && /suppressed during disposal/i.test(l)) continue;
+    if (chain.length > 1 && isDisposalConstantMessage(l)) continue;
     parts.push(l);
   }
   const detail = parts.length ? parts.join(" ← ") : label(e);

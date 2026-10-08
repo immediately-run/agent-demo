@@ -193,3 +193,29 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* R3-848 — the other-repositories row's open control: a real button spanning
+   the row's content, keeping the row's own list-item semantics. */
+.cl-others-open {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  padding: 6px 4px;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cl-others-open:hover { background: var(--cl-hover, rgba(127, 127, 127, 0.12)); }
+.cl-others-open:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.cl-others-refused {
+  display: block;
+  margin: 0 4px 4px;
+  font-size: 11px;
+  opacity: 0.8;
+}

@@ -19,6 +19,8 @@ import {
 vi.mock("@immediately-run/sdk", () => ({
   postToRegion: vi.fn(async () => {}),
   revealRegion: vi.fn(async () => {}),
+  // R3-848: the host-mediated verb, spied from the click handler.
+  openRepository: vi.fn(async () => {}),
   useWorkspace: vi.fn(() => null),
   onRegionMessage: vi.fn(
     (listener: (m: { from: string; data: unknown }) => void) => {
@@ -84,12 +86,15 @@ const makeStore = () => makeSeededStore(async (s) => {
 
 import ConversationList from "./ConversationList";
 import { STAGE_REGION } from "../lib/conversationIpc";
+import { openRepository } from "@immediately-run/sdk";
 
 const regionListeners: Array<(m: { from: string; data: unknown }) => void> = [];
 
 beforeEach(() => {
   regionListeners.length = 0;
   lastStore = null;
+  vi.mocked(openRepository).mockClear();
+  vi.mocked(openRepository).mockImplementation(async () => {});
   // Restore the default factory — a describe that re-seeds `storeHolder.make`
   // must never leak its fixture into describes that run after it.
   storeHolder.make = makeStore;
@@ -202,5 +207,104 @@ describe("ConversationList — the other-repositories count names what it counts
     const singularDigit = screen.getByText("1");
     expect(singularDigit.getAttribute("aria-hidden")).toBe("true");
     expect(singularDigit.parentElement!.getAttribute("title")).toBe("1 conversation in third/repo");
+  });
+});
+
+// ── R3-848 — the other-repositories rows open their repository ───────────────
+// Each row is a real button that calls the host-mediated openRepository() with
+// the row's coordinates, synchronously from the click handler (an await before
+// the call would lose the host's transient activation), and a refusal lands
+// its code ON the row. Rows come from the REAL fs-injected store.
+describe("ConversationList — other-repositories rows open the repository (R3-848)", () => {
+  const makeOtherRepoStore = () =>
+    makeSeededStore(async (s) => {
+      await s.create("mine", "owner/current");
+      // Stamped for ANOTHER repo, with its provider stamp.
+      await s.create("elsewhere", "other/repo", "github");
+    });
+
+  const renderWithOthers = async () => {
+    storeHolder.make = makeOtherRepoStore;
+    render(<ConversationList />);
+    // No workspace mocked ⇒ every stamped conversation groups under "other"
+    // — which is exactly this fixture's shape. The rows render the GROUP's
+    // repo label, never the conversation titles.
+    await waitFor(() => expect(screen.getByText("other/repo")).toBeTruthy());
+    // Open the <details> so the rows render.
+    fireEvent.click(screen.getByText("Other repositories"));
+  };
+
+  it("a row is a real button whose click calls openRepository once, with the row's coordinates", async () => {
+    await renderWithOthers();
+    const row = screen.getByRole("button", { name: /other\/repo/ });
+    fireEvent.click(row);
+    expect(openRepository).toHaveBeenCalledTimes(1);
+    expect(openRepository).toHaveBeenCalledWith(
+      {
+        provider: "github",
+        namespace: "other",
+        repository: "repo",
+      },
+      // R3-1033: the reveal names the conversations panel — the click came from
+      // here, and the clicked conversation is stamped for the target repo.
+      { panel: "agent" },
+    );
+  });
+
+  it("the call happens synchronously inside the handler — no await can slip in front of it", async () => {
+    await renderWithOthers();
+    // A pending promise: the handler cannot have awaited anything before the
+    // call and still see the host's transient activation (an await before it is
+    // the no-activation refusal this guard exists to prevent).
+    let settle!: () => void;
+    vi.mocked(openRepository).mockImplementation(
+      () => new Promise<void>((res) => { settle = res; }),
+    );
+    const row = screen.getByRole("button", { name: /other\/repo/ });
+    fireEvent.click(row);
+    // Called IMMEDIATELY after the dispatch — before anything asynchronous ran.
+    expect(openRepository).toHaveBeenCalledTimes(1);
+    settle();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+
+  it("a refusal lands its code on the row that asked", async () => {
+    await renderWithOthers();
+    vi.mocked(openRepository).mockRejectedValueOnce(
+      Object.assign(new Error("repository open refused"), { code: "forbidden" }),
+    );
+    const row = screen.getByRole("button", { name: /other\/repo/ });
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("forbidden"));
+  });
+
+  it("a legacy group (no provider stamp) is REFUSED on the row, never opened under a guessed provider", async () => {
+    // Round-1 review: the SDK's workspace can carry a `local` provider, so a
+    // github default is the guess the item said not to make. The row refuses.
+    storeHolder.make = () => makeSeededStore(async (s) => {
+      await s.create("mine", "owner/current");
+      await s.create("legacy", "old/repo"); // stamped before R3-848: no provider
+    });
+    render(<ConversationList />);
+    await waitFor(() => expect(screen.getByText("old/repo")).toBeTruthy());
+    fireEvent.click(screen.getByText("Other repositories"));
+    fireEvent.click(screen.getByRole("button", { name: /old\/repo/ }));
+    expect(openRepository).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain("no provider stamp"),
+    );
+  });
+
+  it("a successful open clears the row's earlier refusal", async () => {
+    await renderWithOthers();
+    const row = screen.getByRole("button", { name: /other\/repo/ });
+    vi.mocked(openRepository).mockRejectedValueOnce(
+      Object.assign(new Error("repository open refused"), { code: "forbidden" }),
+    );
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("forbidden"));
+    vi.mocked(openRepository).mockResolvedValueOnce(undefined as never);
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 });

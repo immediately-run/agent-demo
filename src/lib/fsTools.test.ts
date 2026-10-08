@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
+import { createFsToolset, resolveWorkingTreeMount, findConferredWorktree, BINARY_IMAGE_EXTENSIONS, type FsPortLike, type FsDirent, type FsStat } from './fsTools';
+import { suppressed } from './testing/suppressedError';
 
 // AA-23: the workbench agent must author the STAGE app's conferred working tree
 // (`type:'worktree'`), NOT its own repo — targeting `getAppMountPath()` was the bug
@@ -401,5 +402,276 @@ describe('read_file offset/limit paging (R3-223)', () => {
       offset = Number(m[1]);
     }
     expect(collected.join('\n')).toBe(original); // every byte recovered
+  });
+});
+
+// R3-856 — tool calls whose intent is clear are not refused. Three failures
+// from one owner session (the movie-night-report build): `edits: []` beside a
+// complete pair, grep's `flags: "n"` read as a RegExp flag, and text written
+// into an image path after a failed fetch.
+describe('fsError unwraps a SuppressedError (R3-1026)', () => {
+  // ZenFS disposal wraps the REAL write failure in a SuppressedError whose own
+  // message is the constant "An error was suppressed during disposal." — live on
+  // the venue 2026-10-07, edit_file surfaced exactly that, twice, and the cause
+  // never reached the model. The fixture is the shared one (testing/suppressedError).
+  const throwingFs = (thrown: unknown): MemFs => {
+    const fs = seed();
+    fs.writeFile = async () => {
+      throw thrown;
+    };
+    return fs;
+  };
+
+  it('write_file surfaces the innermost code, not the disposal constant', async () => {
+    const cause = Object.assign(new Error('permission on overlay'), { code: 'EACCES' });
+    const res = await ts(throwingFs(suppressed(cause, new Error('disposal also failed')))).execute('write_file', { path: 'src/x.ts', content: 'x' });
+    expect(res).toEqual({ content: 'read-only: this mount cannot be written', isError: true });
+  });
+
+  it('edit_file surfaces the innermost MESSAGE when no cause carries a code', async () => {
+    const res = await ts(throwingFs(suppressed(new Error('overlay write failed: backing store vanished'), new Error('disposal also failed')))).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: 'TODO refactor',
+      new_string: 'cleaned',
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content).toBe('error: overlay write failed: backing store vanished');
+    expect(res.content).not.toContain('suppressed during disposal');
+  });
+
+  it('a plain (unwrapped) error behaves exactly as before', async () => {
+    const res = await ts(throwingFs(Object.assign(new Error('disk full'), { code: 'ENOSPC' }))).execute('write_file', {
+      path: 'src/x.ts',
+      content: 'x',
+    });
+    expect(res).toEqual({ content: 'ENOSPC: disk full', isError: true });
+  });
+
+  it('replace_in_files routes its write failure through the same unwrap (round-1 finding)', async () => {
+    const fs = throwingFs(suppressed(new Error('overlay write failed: backing store vanished'), new Error('disposal also failed')));
+    const res = await ts(fs).execute('replace_in_files', { old_string: 'TODO', new_string: 'DONE', paths: ['src'] });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('overlay write failed: backing store vanished');
+    expect(res.content).not.toContain('suppressed during disposal');
+    expect(res.content).toContain('changed so far');
+  });
+});
+
+describe('edit_file — an empty edits[] carries no intent (R3-856)', () => {
+  it('old_string/new_string with edits: [] applies the single edit', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: '(a:number,b:number)=>a+b',
+      new_string: '(a:number,b:number)=>a + b',
+      edits: [],
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('1 replacement');
+    expect(fs.files.get('/app/src/lib/util.ts')).toBe('export const add = (a:number,b:number)=>a + b // TODO refactor\n');
+  });
+
+  it('both forms non-empty is refused with the either-or message', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('edit_file', {
+      path: 'src/lib/util.ts',
+      old_string: '(a:number,b:number)=>a+b',
+      new_string: '(a:number,b:number)=>a + b',
+      edits: [{ old_string: 'TODO refactor', new_string: 'clean up' }],
+    });
+    expect(res).toEqual({ content: 'pass either old_string/new_string or edits, not both', isError: true });
+    // nothing applied — the all-or-nothing rule holds for the refusal too
+    expect(fs.files.get('/app/src/lib/util.ts')).toBe('export const add = (a:number,b:number)=>a+b // TODO refactor\n');
+  });
+
+  it('neither form is still refused', async () => {
+    const res = await ts(seed()).execute('edit_file', { path: 'src/lib/util.ts', edits: [] });
+    expect(res).toEqual({
+      content: 'edit_file requires a non-empty "old_string" (or an "edits" array)',
+      isError: true,
+    });
+  });
+});
+
+describe('grep — flags normalised, not trusted (R3-856)', () => {
+  it('flags: "n" returns hits with the ignored note — the transcript case', async () => {
+    const { content } = await ts(seed()).execute('grep', { pattern: 'TODO', flags: 'n' });
+    const lines = content.split('\n');
+    expect(lines).toHaveLength(3); // two hits + the note
+    expect(lines[0]).toMatch(/^src\/App\.tsx:2: /);
+    expect(lines[2]).toBe('(ignored flags: n — line numbers are always shown)');
+  });
+
+  it('flags: "g" over two consecutive matching lines returns both (stateful re.test regression)', async () => {
+    const fs = new MemFs({
+      '/app/notes.txt': 'alpha match\nalpha match\nalpha match\nuntouched\n',
+    });
+    const { content } = await ts(fs).execute('grep', { pattern: 'match', flags: 'g' });
+    const hitLines = content.split('\n').filter((l) => l.startsWith('notes.txt:'));
+    expect(hitLines).toEqual([
+      'notes.txt:1: alpha match',
+      'notes.txt:2: alpha match',
+      'notes.txt:3: alpha match',
+    ]);
+    expect(content).toContain('(ignored flags: g');
+  });
+
+  it('an invalid pattern still errors, with the note appended when flags were ignored', async () => {
+    const res = await ts(seed()).execute('grep', { pattern: '(unclosed', flags: 'n' });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('invalid regex');
+    expect(res.content).toContain('ignored flags: n');
+  });
+});
+
+describe('write_file — text into an image path is refused (R3-856)', () => {
+  it('a string into src/assets/posters/avatar.jpg is refused, the file untouched', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('write_file', {
+      path: 'src/assets/posters/avatar.jpg',
+      content: 'https://example.com/avatar.jpg',
+    });
+    expect(res).toEqual({
+      // No fetch:fetch in this toolset's catalog → the refusal does not name
+      // the tool the model was never given (review round 1).
+      content: 'write_file writes text; to add an image, copy an existing asset with copy_file',
+      isError: true,
+    });
+    expect(fs.files.has('/app/src/assets/posters/avatar.jpg')).toBe(false);
+  });
+
+  it('names download_file in the refusal only when the tool was listed', async () => {
+    const withFetch = createFsToolset({ root: '/app', fs: seed(), catalog: [{ name: 'fetch:fetch' }], fetchBytes: async () => { throw new Error('unused'); } });
+    const res = await withFetch.execute('write_file', { path: 'a.jpg', content: 'x' });
+    expect(res.content).toContain('download_file');
+  });
+
+  it('.svg is text and stays writable', async () => {
+    const fs = seed();
+    const res = await ts(fs).execute('write_file', { path: 'src/logo.svg', content: '<svg/>' });
+    expect(res.isError).toBeUndefined();
+    expect(fs.files.get('/app/src/logo.svg')).toBe('<svg/>');
+  });
+
+  it('every image extension the table names is refused — derived from the producer', async () => {
+    // R2: the cases come from BINARY_IMAGE_EXTENSIONS itself, so an extension
+    // added to the table ships refused WITH coverage, not before it.
+    expect(BINARY_IMAGE_EXTENSIONS.length).toBeGreaterThanOrEqual(8);
+    for (const ext of BINARY_IMAGE_EXTENSIONS) {
+      const res = await ts(seed()).execute('write_file', { path: `a.${ext}`, content: 'x' });
+      expect(res.isError, `a.${ext}`).toBe(true);
+    }
+    // case-insensitive on the extension
+    expect((await ts(seed()).execute('write_file', { path: 'a.JPG', content: 'x' })).isError).toBe(true);
+  });
+});
+
+// ── R3-862 — download_file: bytes from the network into the workspace ────────
+// The movie-night-report failure: the agent wrote a poster's URL string into
+// avatar.jpg. The bytes never enter the model's context — only the one-line
+// result does. `fetchBytes` is the mocked hostFetch(bytes) adapter.
+describe('download_file (R3-862)', () => {
+  // A byte-faithful fake fs (the shared MemFs stores strings).
+  class BytesFs {
+    files = new Map<string, Uint8Array>();
+    dirs = new Set<string>(['/']);
+    private err(code: string): Error {
+      return Object.assign(new Error(code), { code });
+    }
+    async readFile(path: string): Promise<Uint8Array> {
+      const f = this.files.get(path);
+      if (!f) throw this.err(this.dirs.has(path) ? 'EISDIR' : 'ENOENT');
+      return f;
+    }
+    async writeFile(path: string, data: string | Uint8Array): Promise<void> {
+      this.files.set(path, typeof data === 'string' ? new TextEncoder().encode(data) : data);
+      let d = path.slice(0, path.lastIndexOf('/'));
+      while (d) {
+        this.dirs.add(d);
+        d = d.slice(0, d.lastIndexOf('/'));
+      }
+    }
+    async mkdir(): Promise<unknown> {
+      return undefined;
+    }
+    async readdir(): Promise<never[]> {
+      return [];
+    }
+    async stat(path: string): Promise<FsStat> {
+      if (this.files.has(path)) {
+        return { size: this.files.get(path)!.length, mtimeMs: 1, isFile: () => true, isDirectory: () => false };
+      }
+      if (this.dirs.has(path)) return { size: 0, mtimeMs: 1, isFile: () => false, isDirectory: () => true };
+      throw this.err('ENOENT');
+    }
+    async unlink(path: string): Promise<void> {
+      if (!this.files.delete(path)) throw this.err('ENOENT');
+    }
+  }
+
+  // The real 1×1 transparent PNG, 70 bytes.
+  const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+  const CATALOG = [{ name: 'fetch:fetch' }];
+  const okFetch = (bytes: Uint8Array = PNG, contentType = 'image/png') => async () =>
+    ({ status: 200, statusText: 'OK', headers: { 'content-type': contentType }, bodyBytes: bytes });
+  const mk = (fetchBytes: unknown, catalog: readonly { name: string }[] = CATALOG) =>
+    createFsToolset({ root: '/app', fs: new BytesFs() as unknown as FsPortLike, catalog, fetchBytes: fetchBytes as never });
+
+  it('a real PNG downloads byte-identical, and the model sees one line', async () => {
+    const fs = new BytesFs();
+    const tsx = createFsToolset({ root: '/app', fs: fs as unknown as FsPortLike, catalog: CATALOG, fetchBytes: okFetch() });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'src/assets/p.png' });
+    expect(res).toEqual({ content: 'saved 70 bytes (image/png) to src/assets/p.png' });
+    expect(fs.files.get('/app/src/assets/p.png')).toEqual(PNG);
+  });
+
+  it('an image path receiving text/html is refused and writes nothing', async () => {
+    const fs = new BytesFs();
+    const tsx = createFsToolset({ root: '/app', fs: fs as unknown as FsPortLike, catalog: CATALOG, fetchBytes: okFetch(PNG, 'text/html') });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/page', path: 'posters/avatar.jpg' });
+    expect(res).toEqual({ content: 'the URL returned text/html, not an image', isError: true });
+    expect(fs.files.size).toBe(0);
+  });
+
+  it('a 404 is refused with the status named', async () => {
+    const tsx = mk(async () => ({ status: 404, statusText: 'Not Found', headers: {}, bodyBytes: undefined }));
+    const res = await tsx.execute('download_file', { url: 'https://example.com/gone.png', path: 'gone.png' });
+    expect(res).toEqual({ content: 'the server answered 404', isError: true });
+  });
+
+  it('a forbidden refusal carries the allowlist hint', async () => {
+    const tsx = mk(async () => {
+      throw Object.assign(new Error('outside the allowlist'), { code: 'forbidden' });
+    });
+    const res = await tsx.execute('download_file', { url: 'https://tracker.example/x.png', path: 'x.png' });
+    expect(res.content).toContain("forbidden: this host is not in the app's net:fetch allowlist");
+    expect(res.isError).toBe(true);
+  });
+
+  it('an existing path without overwrite is refused before the fetch', async () => {
+    let fetched = 0;
+    const fs = new BytesFs();
+    await fs.writeFile('/app/existing.png', PNG);
+    const tsx = createFsToolset({
+      root: '/app',
+      fs: fs as unknown as FsPortLike,
+      catalog: CATALOG,
+      fetchBytes: (async () => {
+        fetched++;
+        return { status: 200, statusText: 'OK', headers: { 'content-type': 'image/png' }, bodyBytes: PNG };
+      }) as never,
+    });
+    const res = await tsx.execute('download_file', { url: 'https://example.com/p.png', path: 'existing.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('already exists');
+    expect(fetched).toBe(0);
+  });
+
+  it('a catalog without fetch:fetch does not list download_file', () => {
+    expect(mk(okFetch(), []).tools.some((t) => t.name === 'download_file')).toBe(false);
+    expect(mk(okFetch()).tools.some((t) => t.name === 'download_file')).toBe(true);
+    // And no transport wired at all → not listed either.
+    const bare = createFsToolset({ root: '/app', fs: new BytesFs() as unknown as FsPortLike });
+    expect(bare.tools.some((t) => t.name === 'download_file')).toBe(false);
   });
 });
