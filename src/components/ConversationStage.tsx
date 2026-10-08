@@ -55,6 +55,9 @@ import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
 import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
 
+// R3-620: a model choice made on a conversation that has since been deleted.
+const MODEL_NOT_SAVED_GONE = "This conversation was deleted, so the model choice was not saved.";
+
 // R-ARD-10: the copy for a dead settings store names BOTH costs — the amnesia
 // (history not re-sent) and the durability consequence (a closed tab loses the
 // run). One constant so a fourth call site cannot ship the old copy.
@@ -214,7 +217,13 @@ export default function ConversationStage() {
       const saved = await store.setModel(conv.id, pair);
       // The user may have opened another conversation while the save was in flight.
       if (convRef.current?.id !== conv.id) return;
-      if (saved) convRef.current = { ...convRef.current, model: saved.model };
+      // The record is gone (deleted from the list while shown here): nothing was
+      // saved, so the picker stays on what the next run will actually use.
+      if (!saved) {
+        setStoreError(MODEL_NOT_SAVED_GONE);
+        return;
+      }
+      convRef.current = { ...convRef.current, model: saved.model };
       setConvModel(pair ?? undefined);
       setStoreError(null);
       publisherRef.current?.onSaved();

@@ -25,7 +25,7 @@ export interface ConversationModelPair {
 export interface HostModelView {
   /**
    * What `chat()` with no pair would run: the resolved provider + the tier model
-   * (the request's `modelHint: 'smart'`, resolved host-side). `null` when no
+   * (the request's `modelHint: 'smart'`, resolved host-side). `null` when the
    * host names no default model (no provider resolves, or the host sent no
    * tier models).
    */
