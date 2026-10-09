@@ -15,6 +15,22 @@ export interface SelectConversationMsg {
 }
 
 /**
+ * panel → stage: "the selection just became EMPTY — show your empty state"
+ * (R3-1079).
+ *
+ * Deleting the last in-scope conversation leaves the stage's shown record gone
+ * while its prompt and picker stay live, because "nothing is selected now" had
+ * no message. The list posts this on the CHANGE to an empty selection (never on
+ * a mount that started empty), and the stage clears through the same selection
+ * arbiter that handles a select. Its own message rather than a nullable id on
+ * `select-conversation`: widening a message an older stage already reads would
+ * change what it parses.
+ */
+export interface ClearSelectionMsg {
+  type: 'clear-selection';
+}
+
+/**
  * stage → panel: "I just mounted — which conversation am I showing?" (R3-243).
  *
  * Needed because a `select-conversation` can be sent while the stage does not exist
@@ -36,7 +52,8 @@ export interface ConversationUpdatedMsg {
 export type ConversationIpcMsg =
   | SelectConversationMsg
   | RequestSelectionMsg
-  | ConversationUpdatedMsg;
+  | ConversationUpdatedMsg
+  | ClearSelectionMsg;
 
 export const isSelect = (m: unknown): m is SelectConversationMsg =>
   (m as { type?: string })?.type === 'select-conversation' && typeof (m as SelectConversationMsg).id === 'string';
@@ -44,6 +61,13 @@ export const isSelect = (m: unknown): m is SelectConversationMsg =>
 /** Build a panel→stage "show this conversation" message. The one place the shape is
  *  spelled, so the announcing sites cannot drift (R3-616 / R6). */
 export const selectMessage = (id: string): SelectConversationMsg => ({ type: 'select-conversation', id });
+
+/** Build a panel→stage "the selection became empty" message (R3-1079). Beside
+ *  `selectMessage` for the same one-place reason. */
+export const clearSelectionMessage = (): ClearSelectionMsg => ({ type: 'clear-selection' });
+
+export const isClearSelection = (m: unknown): m is ClearSelectionMsg =>
+  (m as { type?: string })?.type === 'clear-selection';
 
 export const isUpdated = (m: unknown): m is ConversationUpdatedMsg =>
   (m as { type?: string })?.type === 'conversation-updated' && typeof (m as ConversationUpdatedMsg).id === 'string';

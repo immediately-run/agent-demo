@@ -86,13 +86,14 @@ const makeStore = () => makeSeededStore(async (s) => {
 
 import ConversationList from "./ConversationList";
 import { STAGE_REGION } from "../lib/conversationIpc";
-import { openRepository } from "@immediately-run/sdk";
+import { openRepository, postToRegion } from "@immediately-run/sdk";
 
 const regionListeners: Array<(m: { from: string; data: unknown }) => void> = [];
 
 beforeEach(() => {
   regionListeners.length = 0;
   lastStore = null;
+  vi.mocked(postToRegion).mockClear();
   vi.mocked(openRepository).mockClear();
   vi.mocked(openRepository).mockImplementation(async () => {});
   // Restore the default factory — a describe that re-seeds `storeHolder.make`
@@ -306,5 +307,67 @@ describe("ConversationList — other-repositories rows open the repository (R3-8
     vi.mocked(openRepository).mockResolvedValueOnce(undefined as never);
     fireEvent.click(row);
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+});
+
+// ── R3-1079 — the list tells the stage when its selection becomes EMPTY ──────
+// Deleting the last in-scope conversation used to post nothing (the announce
+// effect returned early on null), so the stage kept the deleted record on
+// screen with its prompt and picker live. The CHANGE to null posts
+// `clear-selection`; a mount that starts empty posts nothing.
+describe("ConversationList — announcing an empty selection to the stage (R3-1079)", () => {
+  const postsToStage = () =>
+    vi
+      .mocked(postToRegion)
+      .mock.calls.filter(([region]) => region === STAGE_REGION)
+      .map(([, msg]) => msg);
+  const clearPosts = () => postsToStage().filter((m) => (m as { type?: string }).type === "clear-selection");
+
+  it("deleting the last in-scope conversation posts clear-selection to the stage", async () => {
+    await renderWithNotesRow();
+    // The mount announcement is a SELECT (the derived newest) — never a clear.
+    expect(postsToStage().length).toBeGreaterThan(0);
+    expect(clearPosts()).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete notes" }));
+    await waitFor(() => expect(screen.queryByText("notes")).toBeNull());
+
+    await waitFor(() => expect(clearPosts()).toEqual([{ type: "clear-selection" }]));
+  });
+
+  it("a mount that starts empty posts nothing — no clear without a change to null", async () => {
+    storeHolder.make = () => makeSeededStore(async () => {});
+    render(<ConversationList />);
+    await waitFor(() =>
+      expect(screen.getByText("No conversations here yet. Start one with “New conversation”.")).toBeTruthy(),
+    );
+    expect(postsToStage()).toEqual([]);
+  });
+
+  it("deleting one of two posts the remaining id and no clear", async () => {
+    storeHolder.make = () =>
+      makeSeededStore(async (s) => {
+        await s.create("first");
+        await s.create("second");
+      });
+    render(<ConversationList />);
+    await waitFor(() => expect(screen.getByText("first")).toBeTruthy());
+
+    // Which row is selected is the derived newest — read it from the store's own
+    // list (newest first), never a hand-typed assumption, then delete THAT row.
+    const metas = (await lastStore!.list()).map((m) => m.title);
+    const selectedTitle = metas[0];
+    const remainingTitle = metas[1];
+    const remainingId = ((await lastStore!.list())[1]).id;
+
+    fireEvent.click(screen.getByRole("button", { name: `Delete ${selectedTitle}` }));
+    await waitFor(() => expect(screen.queryByText(selectedTitle)).toBeNull());
+
+    // The remaining conversation is announced — and no clear ever posts.
+    await waitFor(() =>
+      expect(postsToStage()).toContainEqual({ type: "select-conversation", id: remainingId }),
+    );
+    expect(clearPosts()).toEqual([]);
+    expect(screen.getByText(remainingTitle)).toBeTruthy();
   });
 });

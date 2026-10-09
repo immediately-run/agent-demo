@@ -51,7 +51,7 @@ import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import ResumeAffordance from "./ResumeAffordance";
 import ModelPicker from "./ModelPicker";
-import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
+import { PANEL_REGION, isSelect, isClearSelection } from "../lib/conversationIpc";
 import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
 
@@ -293,6 +293,44 @@ export default function ConversationStage() {
     if (store && id) void store.releaseRun(id).catch(() => {});
   }, []);
 
+  /**
+   * R3-1079 — the stage's EMPTY state, reached only through the selection
+   * arbiter (so a clear and a select that arrive close together resolve in
+   * ticket order): no transcript, no record, no picker bound to a conversation
+   * that is gone.
+   *
+   * A run in flight from this stage is STOPPED here, not left to run on: the
+   * step-3 answer (this item's Status) is that a run on a deleted record DOES
+   * reach the model — `acquireRun` re-mints a lease over the deleted id and the
+   * journal appends recreate its directory — and only the run-end fold refuses
+   * ENOENT. The abort may lose that race to the store's own tripwire (the
+   * delete rmTrees the lease, so the next boundary append rejects
+   * `conversation-removed` and the loop throws) — either way the run ends, and
+   * its unwind paints nothing on the emptied stage: the event callbacks no-op
+   * once the stage no longer shows the run's conversation (a tool batch in
+   * flight still finishes — the abort reaches the loop only at a model turn —
+   * but its rows land nowhere), the outer catches of `run`/`resumeRun` skip
+   * their user-facing writes, and the fold paths persist the transcript without
+   * re-binding or surfacing the benign ENOENT.
+   */
+  const clearStage = useCallback(() => {
+    abortRef.current?.abort();
+    convRef.current = null;
+    pendingModelRef.current = undefined;
+    setConvId(undefined);
+    setTitle("");
+    setConvModel(undefined);
+    setLog([]);
+    setStreaming("");
+    setThinking("");
+    setUsage(null);
+    setPendingResume(null);
+    setLeaseHeld(null);
+    setStoreError(null);
+    // conv is null ⇒ the explicit-inactive doc — same as the boot path.
+    publisherRef.current?.onShow();
+  }, []);
+
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
     pendingModelRef.current = undefined;
@@ -357,12 +395,13 @@ export default function ConversationStage() {
   useEffect(() => {
     stageSelectionRef.current = createStageSelection({
       show: showConversation,
+      clear: clearStage,
       isRunning: (id) => runningIdRef.current === id,
     });
     return () => {
       stageSelectionRef.current = null;
     };
-  }, [showConversation]);
+  }, [showConversation, clearStage]);
 
   // The SCOPING KEY — the repo conversations are stamped with and partitioned by.
   //
@@ -446,10 +485,14 @@ export default function ConversationStage() {
     };
   }, []);
 
-  // The panel drives which conversation is shown.
+  // The panel drives which conversation is shown — including, since R3-1079, the
+  // selection becoming EMPTY (the last in-scope conversation deleted): the clear
+  // rides the same arbiter as a select, never a direct handler, so the two resolve
+  // in order when they arrive close together.
   useEffect(() => {
     return onRegionMessage((m) => {
       if (isSelect(m.data)) void stageSelectionRef.current!.select(m.data.id);
+      else if (isClearSelection(m.data)) stageSelectionRef.current!.clear();
     });
   }, []);
 
@@ -592,6 +635,17 @@ export default function ConversationStage() {
     // No record (the store is unavailable): the held choice still applies to this run.
     const chatState = describeChatState();
     const runModel = runModelFor(convRef.current ?? { model: pendingModelRef.current }, chatState);
+    // R3-1079 (round 3): a clear can land while a TOOL BATCH is in flight — the
+    // abort only reaches the loop at a model turn, so the batch finishes and its
+    // event callbacks fire after clearStage emptied the stage. Every
+    // user-facing callback below no-ops once the stage no longer shows this
+    // run's conversation — the same still-shown discrimination the catches
+    // carry. An EPHEMERAL run (no record) deliberately keeps its surfaces:
+    // nothing was cleared that it can be told apart from, and its rows belong
+    // to the stage that started it. `onBoundary` is NOT gated — the journal
+    // keeps recording the run's boundaries for as long as the record exists
+    // (the batch-must-finish durability invariant).
+    const stageMovedOn = () => !!conv && convRef.current?.id !== conv.id;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(runModel),
@@ -621,12 +675,19 @@ export default function ConversationStage() {
                 },
               }
             : {}),
-          onAssistantDelta: (text) => setStreaming((s) => s + text),
+          onAssistantDelta: (text) => {
+            if (stageMovedOn()) return;
+            setStreaming((s) => s + text);
+          },
           // R3-335 — the live thinking surface. Now that compaction lets a task run past
           // a dozen turns, the silent stretches are longer, and "is it stuck or
           // thinking?" had no answer on screen.
-          onReasoningDelta: (text) => setThinking((t) => t + text),
+          onReasoningDelta: (text) => {
+            if (stageMovedOn()) return;
+            setThinking((t) => t + text);
+          },
           onReasoning: (block) => {
+            if (stageMovedOn()) return;
             setThinking("");
             append(
               block.redactedData !== undefined
@@ -635,22 +696,35 @@ export default function ConversationStage() {
             );
           },
           onAssistantText: (text) => {
+            if (stageMovedOn()) return;
             // A turn an `interrupt` steer cut short is its own row, live and on
             // replay — not a reply the model actually wrote.
             if (text === INTERRUPTED_TURN_TEXT) append({ kind: "interrupted" });
             else if (text.trim()) append({ kind: "text", text });
             setStreaming("");
           },
-          onToolUse: (name, input) => append({ kind: "tool", name, input }),
-          onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
-          onNudge: () => append({ kind: "nudge" }),
-          onUsage: (u) =>
+          onToolUse: (name, input) => {
+            if (stageMovedOn()) return;
+            append({ kind: "tool", name, input });
+          },
+          onToolResult: (name, r) => {
+            if (stageMovedOn()) return;
+            append({ kind: "result", name, content: r.content, isError: r.isError });
+          },
+          onNudge: () => {
+            if (stageMovedOn()) return;
+            append({ kind: "nudge" });
+          },
+          onUsage: (u) => {
+            if (stageMovedOn()) return;
             setUsage({
               spentTokens: u.spentTokens,
               cacheReadTokens: u.cacheReadTokens,
               cacheWriteTokens: u.cacheWriteTokens,
-            }),
+            });
+          },
           onCompact: ({ summarizedCount, cacheReadTokens }) => {
+            if (stageMovedOn()) return;
             append({
               kind: "compaction",
               // R3-336: the compaction rewrote the conversation prefix, so the next turn
@@ -672,6 +746,7 @@ export default function ConversationStage() {
             }
           },
           onSteer: ({ messages }) => {
+            if (stageMovedOn()) return;
             for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
           },
         },
@@ -683,25 +758,52 @@ export default function ConversationStage() {
           // the authoritative transcript (byte-true to what the model saw), the
           // fold watermark, and the carried run-state; the superseded journal
           // entries are reclaimed (R-ARD-5c).
-          convRef.current = await store.fold(conv.id, {
+          const folded = await store.fold(conv.id, {
             messages: transcript,
             title: newTitle,
             repo: conv.repo ?? workspaceRepo,
             ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
           });
-          setTitle(newTitle);
-          setStoreError(null);
-          // R3-631 — the save is the natural heartbeat: messageCount grew.
-          publisherRef.current?.onSaved();
-          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+          // R3-1079 (round 1): the fold still PERSISTS the run's transcript, but
+          // the stage is re-bound only while it still shows this conversation. A
+          // clear can land while the run unwinds on a scope switch (the record
+          // SURVIVES there, the fold succeeds) — without this guard the title
+          // came back on the stage the panel had just emptied.
+          if (convRef.current?.id === conv.id) {
+            convRef.current = folded;
+            setTitle(newTitle);
+            setStoreError(null);
+            // R3-631 — the save is the natural heartbeat: messageCount grew.
+            publisherRef.current?.onSaved();
+            void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+          }
         } catch (e) {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
-          // dead store, one turn later. Never silent (R3-247).
+          // dead store, one turn later. Never silent (R3-247) — EXCEPT for a stage
+          // that no longer shows this conversation because it was CLEARED (convRef
+          // null) or the record was DELETED (fold's ENOENT is the deletion the user
+          // asked for). Any other failure — a journal fault on an extant record
+          // after a mid-run switch, a degraded mount — still surfaces (R3-1079
+          // round 1: the guard must not swallow real fold faults).
+          if (
+            convRef.current?.id !== conv.id &&
+            (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+          )
+            return;
           setStoreError(describe(e, NO_STORE_SUFFIX));
         }
       }
     } catch (e) {
+      // R3-1079 (round 1, both reviewers): a clear can land while the run
+      // unwinds — the panel deleted the conversation mid-run, the abort stopped
+      // the loop, and the next boundary append rejects `conversation-removed`
+      // into THIS catch after clearStage already emptied the stage. The row,
+      // the offer and the store error below belong to a view that is gone; a
+      // run whose conversation is still shown (a cross-frame delete the list
+      // has not yet processed — the row is still selected there) keeps every
+      // surface.
+      if (conv && convRef.current?.id !== conv.id) return;
       // R3-561: the two lease codes are UX states, not codes to print (§9). The
       // discrimination and the copy live in `lib/storeError` — pasting them here
       // is what made the resume catch below get missed the first time.
@@ -818,6 +920,11 @@ export default function ConversationStage() {
     // its chosen model, or falls back to the default when that provider is gone.
     const chatState = describeChatState();
     const runModel = runModelFor(convRef.current, chatState);
+    // R3-1079 (round 3): the same callback guard as `run`'s — a resumed run's
+    // tool batch can finish after a clear emptied the stage. `conv` is always a
+    // record here (a resume requires one). `onBoundary` is not gated: the
+    // journal keeps recording while the record exists.
+    const stageMovedOn = () => convRef.current?.id !== conv.id;
     try {
       const transcript = await runAgent({
         client: createChatModelClient(runModel),
@@ -838,9 +945,16 @@ export default function ConversationStage() {
           onBoundary: async (b) => {
             await store.append(conv.id, b);
           },
-          onAssistantDelta: (text) => setStreaming((s) => s + text),
-          onReasoningDelta: (text) => setThinking((t) => t + text),
+          onAssistantDelta: (text) => {
+            if (stageMovedOn()) return;
+            setStreaming((s) => s + text);
+          },
+          onReasoningDelta: (text) => {
+            if (stageMovedOn()) return;
+            setThinking((t) => t + text);
+          },
           onReasoning: (block) => {
+            if (stageMovedOn()) return;
             setThinking("");
             append(
               block.redactedData !== undefined
@@ -849,47 +963,78 @@ export default function ConversationStage() {
             );
           },
           onAssistantText: (text) => {
+            if (stageMovedOn()) return;
             if (text === INTERRUPTED_TURN_TEXT) append({ kind: "interrupted" });
             else if (text.trim()) append({ kind: "text", text });
             setStreaming("");
           },
-          onToolUse: (name, input) => append({ kind: "tool", name, input }),
-          onToolResult: (name, r) => append({ kind: "result", name, content: r.content, isError: r.isError }),
-          onNudge: () => append({ kind: "nudge" }),
-          onUsage: (u) =>
+          onToolUse: (name, input) => {
+            if (stageMovedOn()) return;
+            append({ kind: "tool", name, input });
+          },
+          onToolResult: (name, r) => {
+            if (stageMovedOn()) return;
+            append({ kind: "result", name, content: r.content, isError: r.isError });
+          },
+          onNudge: () => {
+            if (stageMovedOn()) return;
+            append({ kind: "nudge" });
+          },
+          onUsage: (u) => {
+            if (stageMovedOn()) return;
             setUsage({
               spentTokens: u.spentTokens,
               cacheReadTokens: u.cacheReadTokens,
               cacheWriteTokens: u.cacheWriteTokens,
-            }),
+            });
+          },
           onCompact: ({ summarizedCount }) => {
+            if (stageMovedOn()) return;
             append({ kind: "compaction", summary: `${summarizedCount} earlier messages summarized` });
             void store
               .fold(conv.id)
               .catch((e) => console.warn("mid-run fold at compaction failed (run-end fold still will)", e));
           },
           onSteer: ({ messages }) => {
+            if (stageMovedOn()) return;
             for (const m of messages) append({ kind: "steer", mode: m.mode, text: m.text });
           },
         },
       });
       try {
-        convRef.current = await store.fold(conv.id, {
+        const folded = await store.fold(conv.id, {
           messages: transcript,
           repo: conv.repo ?? workspaceRepo,
           ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
         });
-        setStoreError(null);
-        publisherRef.current?.onSaved();
-        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        // R3-1079 (round 1): same guard as `run`'s fold success — persist
+        // always, re-bind only while this conversation is still shown.
+        if (convRef.current?.id === conv.id) {
+          convRef.current = folded;
+          setStoreError(null);
+          publisherRef.current?.onSaved();
+          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        }
       } catch (e) {
+        // Same discrimination as `run`'s fold catch (R3-1079 round 1): silent
+        // only for a cleared stage or a deleted record; a real fold fault on an
+        // extant record still surfaces (R3-247).
+        if (
+          convRef.current?.id !== conv.id &&
+          (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+        )
+          return;
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     } catch (e) {
-      // R3-561: the same mapping as `run`'s catch. This is the path the takeover
-      // button itself invokes, so a user who takes over a resumable run and loses
-      // the lease again lands here — it printed the raw internal string until the
-      // discrimination moved into `lib/storeError`.
+      // R3-561: the same mapping as `run`'s catch, plus R3-1079's round-1 guard:
+      // a run whose conversation the stage no longer shows (cleared mid-run)
+      // writes nothing — the surfaces belong to a view that is gone.
+      if (convRef.current?.id !== conv.id) return;
+      // This is the path the takeover button itself invokes, so a user who takes
+      // over a resumable run and loses the lease again lands here — it printed
+      // the raw internal string until the discrimination moved into
+      // `lib/storeError`.
       const lease = leaseFailure(e);
       if (lease) {
         append({ kind: "error", text: leaseFailureText(lease, true) });
@@ -933,15 +1078,29 @@ export default function ConversationStage() {
       trailingPartial: pending.replay.trailingPartial,
     });
     try {
-      convRef.current = await store.fold(conv.id, {
+      const folded = await store.fold(conv.id, {
         messages: repaired.messages,
         repo: conv.repo ?? workspaceRepo,
         ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
       });
-      setLog(messagesToLog(repaired.messages));
-      setStoreError(null);
-      void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      // R3-1079 (round 1): same guard as the run paths' fold success — persist
+      // always, re-bind only while this conversation is still shown.
+      if (convRef.current?.id === conv.id) {
+        convRef.current = folded;
+        setLog(messagesToLog(repaired.messages));
+        setStoreError(null);
+        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      }
     } catch (e) {
+      // Same discrimination as the run paths' fold catches (R3-1079 round 2):
+      // silent only for a cleared stage or a deleted record — a delete landing
+      // during the await must not paint a banner on the emptied stage; any
+      // other fold fault still surfaces (R3-247).
+      if (
+        convRef.current?.id !== conv.id &&
+        (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+      )
+        return;
       setStoreError(describe(e, NO_STORE_SUFFIX));
     }
   };

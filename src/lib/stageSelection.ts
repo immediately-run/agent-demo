@@ -17,6 +17,13 @@ export interface StageSelection {
    * store is open, otherwise holds the id until `storeOpened` (whose call settles the
    * returned promise). */
   select(id: string): Promise<StageSelectionResult>;
+  /** Record that the panel's selection became EMPTY (R3-1079 — the last in-scope
+   * conversation was deleted, or the scope emptied): supersedes a held or in-flight
+   * selection exactly as a later `select` supersedes an earlier one, then hands the
+   * stage its empty state through the `clear` callback. Never gated on `isRunning` —
+   * unlike a stray re-tap, a clear means the record on screen is GONE, and a run in
+   * flight on it must be stopped by the callback, not protected. */
+  clear(): void;
   /** Record the store; load the held selection if there is one, else — if nothing has
    * been shown — the newest in scope. */
   storeOpened(store: ConversationStore, repo: string | undefined): Promise<StageSelectionResult>;
@@ -26,6 +33,11 @@ export interface StageSelection {
 
 export interface StageSelectionOptions {
   show: (conv: Conversation) => void;
+  /** The stage's EMPTY state (R3-1079): no transcript, no record, no picker bound to
+   * a gone conversation — and a run in flight from the cleared stage stopped. Called
+   * only through the arbiter, so a clear and a select that arrive close together
+   * resolve in ticket order. */
+  clear: () => void;
   /** Whether a run is in flight for the given conversation. A re-select of the shown
    * conversation is a repair gesture (reload it) — unless a run is in flight for *that
    * same* conversation, in which case the tap is ignored so in-flight work is never
@@ -41,7 +53,7 @@ export interface StageSelectionOptions {
  * is discarded — without it, a fallback `list()`/`load()` that finishes after a `select`
  * would put the newest conversation back on screen.
  */
-export function createStageSelection({ show, isRunning }: StageSelectionOptions): StageSelection {
+export function createStageSelection({ show, clear: clearStage, isRunning }: StageSelectionOptions): StageSelection {
   let store: ConversationStore | null = null;
   let held: string | null = null;
   let heldResolve: ((r: StageSelectionResult) => void) | null = null;
@@ -103,6 +115,25 @@ export function createStageSelection({ show, isRunning }: StageSelectionOptions)
       const [newest] = scopeConversations(await store.list(), repo).mine;
       if (!newest) return 'missing';
       return attempt(newest.id, ticket);
+    },
+
+    clear() {
+      // A clear supersedes a held selection exactly as a later select would —
+      // otherwise a select that arrived before the store opened would load and
+      // show AFTER the empty state had already been handed over.
+      if (heldResolve) {
+        heldResolve('superseded');
+        heldResolve = null;
+      }
+      held = null;
+      latest++; // slice out any in-flight load's (late) result, as `adopt` does
+      // The clear is an explicit statement about what to show (nothing), so it
+      // cancels the newest-in-scope fallback for good — the same guard a select
+      // sets. Without it, a store opening after the clear would auto-show the
+      // newest over the empty state the panel just announced.
+      shown = true;
+      currentId = null;
+      clearStage();
     },
 
     adopt(conv) {
