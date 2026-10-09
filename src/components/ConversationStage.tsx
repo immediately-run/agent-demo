@@ -303,8 +303,12 @@ export default function ConversationStage() {
    * step-3 answer (this item's Status) is that a run on a deleted record DOES
    * reach the model — `acquireRun` re-mints a lease over the deleted id and the
    * journal appends recreate its directory — and only the run-end fold refuses
-   * ENOENT. Aborting surfaces as the loop's clean stop (transcript so far), and
-   * the fold catch below stays silent for a conversation no longer shown.
+   * ENOENT. The abort may lose that race to the store's own tripwire (the
+   * delete rmTrees the lease, so the next boundary append rejects
+   * `conversation-removed` and the loop throws) — either way the run ends, and
+   * every catch below stays silent for a conversation the stage no longer
+   * shows: its failure row, its lease offer and its save error belong to a view
+   * that is gone.
    */
   const clearStage = useCallback(() => {
     abortRef.current?.abort();
@@ -316,6 +320,7 @@ export default function ConversationStage() {
     setLog([]);
     setStreaming("");
     setThinking("");
+    setUsage(null);
     setPendingResume(null);
     setLeaseHeld(null);
     setStoreError(null);
@@ -718,30 +723,51 @@ export default function ConversationStage() {
           // the authoritative transcript (byte-true to what the model saw), the
           // fold watermark, and the carried run-state; the superseded journal
           // entries are reclaimed (R-ARD-5c).
-          convRef.current = await store.fold(conv.id, {
+          const folded = await store.fold(conv.id, {
             messages: transcript,
             title: newTitle,
             repo: conv.repo ?? workspaceRepo,
             ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
           });
-          setTitle(newTitle);
-          setStoreError(null);
-          // R3-631 — the save is the natural heartbeat: messageCount grew.
-          publisherRef.current?.onSaved();
-          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+          // R3-1079 (round 1): the fold still PERSISTS the run's transcript, but
+          // the stage is re-bound only while it still shows this conversation. A
+          // clear can land while the run unwinds on a scope switch (the record
+          // SURVIVES there, the fold succeeds) — without this guard the title
+          // came back on the stage the panel had just emptied.
+          if (convRef.current?.id === conv.id) {
+            convRef.current = folded;
+            setTitle(newTitle);
+            setStoreError(null);
+            // R3-631 — the save is the natural heartbeat: messageCount grew.
+            publisherRef.current?.onSaved();
+            void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+          }
         } catch (e) {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
-          // dead store, one turn later. Never silent (R3-247) — unless the stage no
-          // longer shows this conversation (R3-1079: a clear stopped the run and
-          // emptied the stage; a select switched it): its save error belongs to a
-          // view that is gone, and the ENOENT after a delete is the deletion the
-          // user asked for.
-          if (convRef.current?.id !== conv.id) return;
+          // dead store, one turn later. Never silent (R3-247) — EXCEPT for a stage
+          // that no longer shows this conversation because it was CLEARED (convRef
+          // null) or the record was DELETED (fold's ENOENT is the deletion the user
+          // asked for). Any other failure — a journal fault on an extant record
+          // after a mid-run switch, a degraded mount — still surfaces (R3-1079
+          // round 1: the guard must not swallow real fold faults).
+          if (
+            convRef.current?.id !== conv.id &&
+            (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+          )
+            return;
           setStoreError(describe(e, NO_STORE_SUFFIX));
         }
       }
     } catch (e) {
+      // R3-1079 (round 1, both reviewers): a clear can land while the run
+      // unwinds — the panel deleted the conversation mid-run, the abort stopped
+      // the loop, and the next boundary append rejects `conversation-removed`
+      // into THIS catch after clearStage already emptied the stage. The row,
+      // the offer and the store error below belong to a view that is gone; a
+      // run whose conversation is still shown (the cross-frame delete with
+      // another row re-selected) keeps every surface.
+      if (conv && convRef.current?.id !== conv.id) return;
       // R3-561: the two lease codes are UX states, not codes to print (§9). The
       // discrimination and the copy live in `lib/storeError` — pasting them here
       // is what made the resume catch below get missed the first time.
@@ -914,25 +940,39 @@ export default function ConversationStage() {
         },
       });
       try {
-        convRef.current = await store.fold(conv.id, {
+        const folded = await store.fold(conv.id, {
           messages: transcript,
           repo: conv.repo ?? workspaceRepo,
           ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
         });
-        setStoreError(null);
-        publisherRef.current?.onSaved();
-        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        // R3-1079 (round 1): same guard as `run`'s fold success — persist
+        // always, re-bind only while this conversation is still shown.
+        if (convRef.current?.id === conv.id) {
+          convRef.current = folded;
+          setStoreError(null);
+          publisherRef.current?.onSaved();
+          void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+        }
       } catch (e) {
-        // Same guard as `run`'s fold catch (R3-1079): a resumed run's save error
-        // is surfaced only while its conversation is still the one shown.
-        if (convRef.current?.id !== conv.id) return;
+        // Same discrimination as `run`'s fold catch (R3-1079 round 1): silent
+        // only for a cleared stage or a deleted record; a real fold fault on an
+        // extant record still surfaces (R3-247).
+        if (
+          convRef.current?.id !== conv.id &&
+          (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+        )
+          return;
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     } catch (e) {
-      // R3-561: the same mapping as `run`'s catch. This is the path the takeover
-      // button itself invokes, so a user who takes over a resumable run and loses
-      // the lease again lands here — it printed the raw internal string until the
-      // discrimination moved into `lib/storeError`.
+      // R3-561: the same mapping as `run`'s catch, plus R3-1079's round-1 guard:
+      // a run whose conversation the stage no longer shows (cleared mid-run)
+      // writes nothing — the surfaces belong to a view that is gone.
+      if (convRef.current?.id !== conv.id) return;
+      // This is the path the takeover button itself invokes, so a user who takes
+      // over a resumable run and loses the lease again lands here — it printed
+      // the raw internal string until the discrimination moved into
+      // `lib/storeError`.
       const lease = leaseFailure(e);
       if (lease) {
         append({ kind: "error", text: leaseFailureText(lease, true) });
@@ -976,14 +1016,19 @@ export default function ConversationStage() {
       trailingPartial: pending.replay.trailingPartial,
     });
     try {
-      convRef.current = await store.fold(conv.id, {
+      const folded = await store.fold(conv.id, {
         messages: repaired.messages,
         repo: conv.repo ?? workspaceRepo,
         ...(conv.repo === undefined ? { repoProvider: workspaceProvider } : {}),
       });
-      setLog(messagesToLog(repaired.messages));
-      setStoreError(null);
-      void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      // R3-1079 (round 1): same guard as the run paths' fold success — persist
+      // always, re-bind only while this conversation is still shown.
+      if (convRef.current?.id === conv.id) {
+        convRef.current = folded;
+        setLog(messagesToLog(repaired.messages));
+        setStoreError(null);
+        void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
+      }
     } catch (e) {
       setStoreError(describe(e, NO_STORE_SUFFIX));
     }
