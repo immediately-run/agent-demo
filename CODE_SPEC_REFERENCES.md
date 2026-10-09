@@ -39,28 +39,26 @@ still the shape. Do not delete it without a host-capability signal.
 **Spec:** `LLM_AND_AGENTS_SPEC §2.2` (transport) + `SECRETS_SPEC §6` (secret
 injection, never read by the app).
 
-**Mapping:** `claudeClient.ts` / `openaiClient.ts` route every call through the
-host fetch helper (`hostFetch`); `modelClient.ts` sets `streamImpl: null`
-(SECRETS_SPEC §2.2 — the backend stream proxy never injects BYOK secrets, so
-streaming is disabled by design). Secrets are injected host-side via
-`injectSecret` (declared in `package.json` `requests.net:fetch.hosts`), never
-read by the app. The dev/test-only `apiKey` header paths are explicitly gated
-("prod relies on injectSecret").
+**Mapping (verified 2026-10-09):** the BYOK client modules are gone (removed
+with the SDK `chat()` move — `chatModelClient.ts` carries the model call over
+`llm:chat`, host-side key injection included; no BYOK secret or `apiKey`
+header path remains). `net:fetch` is hosts-only — the hosts list below; no
+`injectSecret` declaration exists.
 
-## net:fetch host declaration (verified 2026-06)
+## net:fetch host declaration (verified 2026-10-09)
 
-`package.json` declares **two** hosts and the code calls **both**, with no
-undeclared host and no dead declaration:
-- `https://api.anthropic.com/v1/` ← `claudeClient.ts` (`/v1/messages`),
-  `injectSecret { family: "anthropic", type: "api-key" }` → `x-api-key`.
-- `https://openrouter.ai/api/v1/` ← `openaiClient.ts` / `modelClient.ts`
-  (`/api/v1/chat/completions`), `injectSecret { type: "bearer-token" }`.
+`package.json` declares **two** hosts; neither is called by fixed app code
+(the model call is the SDK `chat()` over `llm:chat` — `chatModelClient.ts`),
+both are exercised host-/agent-side under the grant's allowlist:
+- `https://example.com` — the `fetch:fetch` demo (the M2 attenuated-delegation
+  probe and `download_file`'s tests).
+- `https://placehold.co` — R3-863's poster-download live leg (poster-shaped
+  placeholder images, fetched by the host for `download_file`).
 
-## Model ids (verified 2026-06 against the `claude-api` skill)
+## Model ids (verified 2026-10-09)
 
-- Anthropic default `claude-opus-4-8` (`claudeClient.ts` / `modelClient.ts`) is
-  the **current** Opus model id — not stale, no date suffix. Conforms.
-- OpenRouter default `openai/gpt-4o-mini` is a non-Anthropic id (out of scope).
+No repo code pins a model id: `chatModelClient.ts` states the provider AND the
+model are the user's host-side preference — this client names neither.
 
 ---
 

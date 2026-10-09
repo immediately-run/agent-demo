@@ -26,7 +26,8 @@
       "task:invoke": {},
       "net:fetch": {
         "hosts": [
-          "https://example.com"
+          "https://example.com",
+          "https://placehold.co"
         ]
       },
       "vcs:read": {}
