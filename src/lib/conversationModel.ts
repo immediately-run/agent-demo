@@ -30,6 +30,15 @@ export interface ConversationMeta {
    */
   repo?: string;
   /**
+   * R3-620 — the user's per-conversation model choice: a concrete
+   * provider-and-model pair naming one of the user's CONNECTED providers.
+   * Absent means "the Settings default" (what `chat()` with no pair runs); no
+   * existing record is rewritten. The choice is validated at run time against
+   * the connected set (`resolveConversationModel`), so a stale record cannot pin
+   * a conversation to a provider that is gone. Additive-optional (schema stays 1).
+   */
+  model?: { providerId: string; model: string };
+  /**
    * The repo stamp's PROVIDER (R3-848) — the workspace channel's `provider` at
    * the save that stamped `repo` (the label carries only `namespace/repository`,
    * and the label alone cannot say which provider the repo lives under).

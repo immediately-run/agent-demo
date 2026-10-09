@@ -11,7 +11,7 @@
 // resolves the user's preferred provider/model (AGENT_AUTHORING_ARCHITECTURE §3; H2
 // favours chat() over net:fetch+secrets). Needs only the `llm:chat` capability.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCatalog, useMounts, getAppMountPath, describeChat, hostFetch } from "@immediately-run/sdk";
+import { useCatalog, useMounts, getAppMountPath, describeChat, describeChatState, hostFetch } from "@immediately-run/sdk";
 import { catalogToolset, mergeToolsets } from "../lib/toolset";
 import { createFsToolset, resolveWorkingTreeMount } from "../lib/fsTools";
 import { createProjectToolset } from "../lib/projectTools";
@@ -20,6 +20,7 @@ import { createGitToolset } from "../lib/gitTools";
 import { buildSystemPrompt, todayIso } from "../lib/agentPrompt";
 import { withSkills } from "../lib/skills";
 import { createChatModelClient } from "../lib/chatModelClient";
+import { runModelFor } from "../lib/resolveConversationModel";
 import { runAgent, type LoopBoundary } from "../lib/agentLoop";
 import { openConversationStore, deriveTitle, type ConversationStore } from "../lib/conversationStore";
 import type { Conversation } from "../lib/conversationModel";
@@ -205,7 +206,9 @@ export default function CodingAgent() {
     const journalConv = store?.hasJournal() ? convRef.current : null;
     try {
       const transcript = await runAgent({
-        client: createChatModelClient(),
+        // The adopted conversation keeps the model the user chose for it in the
+        // stage; in a frame without the connected set the choice resolves away.
+        client: createChatModelClient(runModelFor(convRef.current, describeChatState())),
         tools: toolset.tools,
         execute: toolset.execute,
         system: buildSystemPrompt({ tools: toolset.tools, skills, workspaceRoot, today: todayIso() }),

@@ -434,3 +434,22 @@
   flex-wrap: wrap;
   margin-top: 6px;
 }
+
+/* R3-620 — the per-conversation model picker (renders only when the host sent
+   the chooseable set: the frame holds the elevated llm:chooseModel). */
+.ca-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.ca-model-select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  padding: 3px 10px;
+  max-width: 46vw;
+}

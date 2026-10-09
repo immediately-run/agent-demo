@@ -17,6 +17,7 @@ vi.mock("@immediately-run/sdk", () => ({
   useMounts: vi.fn(() => []),
   getAppMountPath: vi.fn(() => "/app"),
   describeChat: vi.fn(() => null),
+  describeChatState: vi.fn(() => ({ status: "not-configured" })),
   // Read at toolset-construction time (createDiagnosticsToolset's default reader,
   // createGitToolset's state), inside the component's useMemo during render.
   getDiagnostics: vi.fn(() => ({
