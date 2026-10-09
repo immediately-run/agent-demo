@@ -47,14 +47,15 @@ streaming is disabled by design). Secrets are injected host-side via
 read by the app. The dev/test-only `apiKey` header paths are explicitly gated
 ("prod relies on injectSecret").
 
-## net:fetch host declaration (verified 2026-06)
+## net:fetch host declaration (verified 2026-10-09)
 
-`package.json` declares **two** hosts and the code calls **both**, with no
-undeclared host and no dead declaration:
-- `https://api.anthropic.com/v1/` ← `claudeClient.ts` (`/v1/messages`),
-  `injectSecret { family: "anthropic", type: "api-key" }` → `x-api-key`.
-- `https://openrouter.ai/api/v1/` ← `openaiClient.ts` / `modelClient.ts`
-  (`/api/v1/chat/completions`), `injectSecret { type: "bearer-token" }`.
+`package.json` declares **two** hosts; neither is called by fixed app code
+(the model call is the SDK `chat()` over `llm:chat` — `chatModelClient.ts`),
+both are exercised host-/agent-side under the grant's allowlist:
+- `https://example.com` — the `fetch:fetch` demo (the M2 attenuated-delegation
+  probe and `download_file`'s tests).
+- `https://placehold.co` — R3-863's poster-download live leg (poster-shaped
+  placeholder images, fetched by the host for `download_file`).
 
 ## Model ids (verified 2026-06 against the `claude-api` skill)
 
