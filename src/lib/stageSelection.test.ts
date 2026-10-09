@@ -36,7 +36,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const newest = await store.create('newest', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     const heldSelect = stage.select(older.id); // store not open yet → held
     await stage.storeOpened(store, REPO);
 
@@ -57,7 +57,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const mineNewest = await store.create('mine-newest', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     await stage.storeOpened(store, REPO);
 
     expect(show).toHaveBeenCalledTimes(1);
@@ -83,7 +83,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     });
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     const fallback = stage.storeOpened(store, REPO); // newest, deferred
     const selected = stage.select(older.id); // older, immediate
 
@@ -99,7 +99,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   it('two selections resolve to the later one even when the first load finishes last', async () => {
     const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     await stage.storeOpened(store, REPO); // empty → fallback shows nothing
 
     const a = await store.create('a', REPO);
@@ -132,7 +132,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     vi.spyOn(store, 'load').mockImplementation((id: string) => (id === newest.id ? gate.promise : realLoad(id)));
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     const fallback = stage.storeOpened(store, REPO); // newest, deferred
 
     const adopted: Conversation = {
@@ -155,7 +155,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   it("selecting a deleted conversation resolves 'missing' and shows nothing", async () => {
     const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     await stage.storeOpened(store, REPO); // empty → fallback shows nothing
 
     await expect(stage.select('does-not-exist')).resolves.toBe('missing');
@@ -165,7 +165,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
   it("the store opening after an adoption does not replace it (shown guard)", async () => {
     const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
 
     const adopted: Conversation = {
       id: 'adopted',
@@ -189,7 +189,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const newer = await store.create('newer', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     const pFirst = stage.select(older.id); // store not open yet → held
     const pSecond = stage.select(newer.id); // held → supersedes the first
 
@@ -207,7 +207,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const held = await store.create('held', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     const pSelect = stage.select(held.id); // store not open yet → held
 
     const adopted: Conversation = {
@@ -231,7 +231,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const a = await store.create('a', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     await stage.storeOpened(store, REPO); // shows `a` (newest, fallback)
     show.mockClear();
 
@@ -246,7 +246,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const a = await store.create('a', REPO);
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: () => true });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: () => true });
     await stage.storeOpened(store, REPO); // shows `a`
     show.mockClear();
 
@@ -260,7 +260,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     await store.create('a', REPO); // the shown conversation
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: () => true });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: () => true });
     await stage.storeOpened(store, REPO); // shows `a` (only one in scope)
     const b = await store.create('b', REPO);
     show.mockClear();
@@ -276,7 +276,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
     const show = vi.fn();
     // A run is in flight for some other conversation, not `a`.
-    const stage = createStageSelection({ show, isRunning: (id) => id === 'other-run' });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: (id) => id === 'other-run' });
     await stage.storeOpened(store, REPO); // shows `a`
     show.mockClear();
 
@@ -291,7 +291,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
 
     const show = vi.fn();
     let adoptedId = '';
-    const stage = createStageSelection({ show, isRunning: (id) => id === adoptedId });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: (id) => id === adoptedId });
     await stage.storeOpened(store, REPO); // empty → shows nothing
     const adopted = await store.create('adopted', REPO);
     adoptedId = adopted.id;
@@ -307,7 +307,7 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     const store = createConversationStore({ recordRoot: '/settings', fs, tabId: 'tab-test' });
 
     const show = vi.fn();
-    const stage = createStageSelection({ show, isRunning: idle });
+    const stage = createStageSelection({ show, clear: vi.fn(), isRunning: idle });
     await stage.storeOpened(store, REPO); // empty → shows nothing
     const adopted = await store.create('adopted', REPO);
     stage.adopt(adopted);
@@ -316,5 +316,98 @@ describe('createStageSelection (plan 05 / R3-594)', () => {
     await expect(stage.select(adopted.id)).resolves.toBe('shown');
     expect(show).toHaveBeenCalledTimes(1);
     expect(show).toHaveBeenCalledWith(shownOf(adopted.id));
+  });
+
+  // ── R3-1079 — the selection becoming EMPTY ─────────────────────────────────
+  // A clear supersedes exactly like a select does (held, in-flight) and hands
+  // the stage its empty state through the `clear` callback — never gated on
+  // `isRunning`, because the record on screen is gone.
+  describe('clear (R3-1079)', () => {
+    it('clearing after a shown selection hands the stage its empty state', async () => {
+      const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
+      await store.create('a', REPO);
+
+      const show = vi.fn();
+      const clear = vi.fn();
+      const stage = createStageSelection({ show, clear, isRunning: idle });
+      await stage.storeOpened(store, REPO); // shows `a` (newest, fallback)
+      expect(show).toHaveBeenCalledTimes(1);
+      expect(clear).not.toHaveBeenCalled();
+
+      stage.clear();
+      expect(clear).toHaveBeenCalledTimes(1);
+    });
+
+    it('clear is not gated on a run in flight — the record on screen is gone', async () => {
+      const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
+      await store.create('a', REPO);
+
+      const show = vi.fn();
+      const clear = vi.fn();
+      const stage = createStageSelection({ show, clear, isRunning: () => true });
+      await stage.storeOpened(store, REPO); // shows `a`
+
+      stage.clear();
+      expect(clear).toHaveBeenCalledTimes(1);
+    });
+
+    it('a clear slices out an in-flight select: its late load is discarded, and clear wins', async () => {
+      const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
+      const a = await store.create('a', REPO);
+
+      // Hold a's load so the clear lands while it is in flight.
+      const gate = deferred<Conversation | null>();
+      const realLoad = store.load.bind(store);
+      vi.spyOn(store, 'load').mockImplementation((id: string) => (id === a.id ? gate.promise : realLoad(id)));
+
+      const show = vi.fn();
+      const clear = vi.fn();
+      const stage = createStageSelection({ show, clear, isRunning: idle });
+      const selected = stage.select(a.id); // deferred
+
+      stage.clear(); // while a's load is in flight
+      expect(clear).toHaveBeenCalledTimes(1);
+
+      gate.resolve(a); // the select's late result must be discarded
+      await expect(selected).resolves.toBe('superseded');
+      expect(show).not.toHaveBeenCalled();
+    });
+
+    it('a select that arrives AFTER a clear wins — the arbiter keeps resolving in order', async () => {
+      const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
+      const a = await store.create('a', REPO);
+
+      const show = vi.fn();
+      const clear = vi.fn();
+      const stage = createStageSelection({ show, clear, isRunning: idle });
+      await stage.storeOpened(store, REPO); // shows `a` (newest, fallback)
+      show.mockClear();
+
+      stage.clear();
+      expect(clear).toHaveBeenCalledTimes(1);
+
+      await expect(stage.select(a.id)).resolves.toBe('shown');
+      expect(show).toHaveBeenCalledTimes(1);
+      expect(show).toHaveBeenCalledWith(shownOf(a.id));
+    });
+
+    it('a clear supersedes a selection still held before the store opens', async () => {
+      const store = createConversationStore({ recordRoot: '/settings', fs: new MemFs(), tabId: 'tab-test' });
+      const held = await store.create('held', REPO);
+
+      const show = vi.fn();
+      const clear = vi.fn();
+      const stage = createStageSelection({ show, clear, isRunning: idle });
+      const pSelect = stage.select(held.id); // store not open yet → held
+
+      stage.clear();
+      await expect(pSelect).resolves.toBe('superseded');
+
+      // The store opening after the clear must not auto-show anything: the clear
+      // is an explicit statement (nothing is selected) and cancels the fallback.
+      await expect(stage.storeOpened(store, REPO)).resolves.toBe('shown');
+      expect(show).not.toHaveBeenCalled();
+      expect(clear).toHaveBeenCalledTimes(1);
+    });
   });
 });

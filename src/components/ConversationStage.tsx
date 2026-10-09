@@ -51,7 +51,7 @@ import { messagesToLog, type LogEntry } from "../lib/transcript";
 import TranscriptRows from "./TranscriptRows";
 import ResumeAffordance from "./ResumeAffordance";
 import ModelPicker from "./ModelPicker";
-import { PANEL_REGION, isSelect } from "../lib/conversationIpc";
+import { PANEL_REGION, isSelect, isClearSelection } from "../lib/conversationIpc";
 import { describeStoreFailure as describe, leaseFailure, leaseFailureText, leaseHeldText } from "../lib/storeError";
 import "./CodingAgent.css";
 
@@ -293,6 +293,36 @@ export default function ConversationStage() {
     if (store && id) void store.releaseRun(id).catch(() => {});
   }, []);
 
+  /**
+   * R3-1079 — the stage's EMPTY state, reached only through the selection
+   * arbiter (so a clear and a select that arrive close together resolve in
+   * ticket order): no transcript, no record, no picker bound to a conversation
+   * that is gone.
+   *
+   * A run in flight from this stage is STOPPED here, not left to run on: the
+   * step-3 answer (this item's Status) is that a run on a deleted record DOES
+   * reach the model — `acquireRun` re-mints a lease over the deleted id and the
+   * journal appends recreate its directory — and only the run-end fold refuses
+   * ENOENT. Aborting surfaces as the loop's clean stop (transcript so far), and
+   * the fold catch below stays silent for a conversation no longer shown.
+   */
+  const clearStage = useCallback(() => {
+    abortRef.current?.abort();
+    convRef.current = null;
+    pendingModelRef.current = undefined;
+    setConvId(undefined);
+    setTitle("");
+    setConvModel(undefined);
+    setLog([]);
+    setStreaming("");
+    setThinking("");
+    setPendingResume(null);
+    setLeaseHeld(null);
+    setStoreError(null);
+    // conv is null ⇒ the explicit-inactive doc — same as the boot path.
+    publisherRef.current?.onShow();
+  }, []);
+
   const showConversation = useCallback((conv: Conversation) => {
     convRef.current = conv;
     pendingModelRef.current = undefined;
@@ -357,12 +387,13 @@ export default function ConversationStage() {
   useEffect(() => {
     stageSelectionRef.current = createStageSelection({
       show: showConversation,
+      clear: clearStage,
       isRunning: (id) => runningIdRef.current === id,
     });
     return () => {
       stageSelectionRef.current = null;
     };
-  }, [showConversation]);
+  }, [showConversation, clearStage]);
 
   // The SCOPING KEY — the repo conversations are stamped with and partitioned by.
   //
@@ -446,10 +477,14 @@ export default function ConversationStage() {
     };
   }, []);
 
-  // The panel drives which conversation is shown.
+  // The panel drives which conversation is shown — including, since R3-1079, the
+  // selection becoming EMPTY (the last in-scope conversation deleted): the clear
+  // rides the same arbiter as a select, never a direct handler, so the two resolve
+  // in order when they arrive close together.
   useEffect(() => {
     return onRegionMessage((m) => {
       if (isSelect(m.data)) void stageSelectionRef.current!.select(m.data.id);
+      else if (isClearSelection(m.data)) stageSelectionRef.current!.clear();
     });
   }, []);
 
@@ -697,7 +732,12 @@ export default function ConversationStage() {
         } catch (e) {
           // A failed save means `convRef.current` keeps the PRE-run messages, so the
           // next turn re-sends a stale (or empty) history — the same amnesia as a
-          // dead store, one turn later. Never silent (R3-247).
+          // dead store, one turn later. Never silent (R3-247) — unless the stage no
+          // longer shows this conversation (R3-1079: a clear stopped the run and
+          // emptied the stage; a select switched it): its save error belongs to a
+          // view that is gone, and the ENOENT after a delete is the deletion the
+          // user asked for.
+          if (convRef.current?.id !== conv.id) return;
           setStoreError(describe(e, NO_STORE_SUFFIX));
         }
       }
@@ -883,6 +923,9 @@ export default function ConversationStage() {
         publisherRef.current?.onSaved();
         void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
       } catch (e) {
+        // Same guard as `run`'s fold catch (R3-1079): a resumed run's save error
+        // is surfaced only while its conversation is still the one shown.
+        if (convRef.current?.id !== conv.id) return;
         setStoreError(describe(e, NO_STORE_SUFFIX));
       }
     } catch (e) {

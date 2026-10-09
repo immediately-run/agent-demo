@@ -18,7 +18,7 @@ import { openConversationStore, metaOf, type ConversationStore } from "../lib/co
 import type { ConversationMeta } from "../lib/conversationModel";
 import { scopeConversations, repoCoordinatesOf, type RepoGroup } from "../lib/conversationScope";
 import { applyConversationUpdate } from "../lib/conversationUpdate";
-import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage } from "../lib/conversationIpc";
+import { STAGE_REGION, isUpdated, isRequestSelection, selectMessage, clearSelectionMessage } from "../lib/conversationIpc";
 import { describeStoreFailure } from "../lib/storeError";
 import "./ConversationList.css";
 
@@ -78,9 +78,24 @@ export default function ConversationList() {
   // tap on a *different* row is therefore announced twice — by the gesture post and
   // again by this effect — the item's accepted cost, harmless because the arbiter is
   // idempotent.
+  //
+  // R3-1079 — the selection BECOMING empty is announced too, as its own message:
+  // deleting the last in-scope conversation (or emptying the scope) used to post
+  // nothing, so the stage kept showing the deleted record with its prompt and picker
+  // live. Tracked against the last ANNOUNCED value, not the last render's: a mount
+  // that starts empty announces nothing (the stage's own newest-in-scope fallback owns
+  // that state), only the change non-null → null posts the clear.
+  const lastAnnouncedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!effectiveSelected) return;
-    void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
+    if (effectiveSelected) {
+      lastAnnouncedRef.current = effectiveSelected;
+      void postToRegion(STAGE_REGION, selectMessage(effectiveSelected)).catch(() => {});
+      return;
+    }
+    if (lastAnnouncedRef.current !== null) {
+      lastAnnouncedRef.current = null;
+      void postToRegion(STAGE_REGION, clearSelectionMessage()).catch(() => {});
+    }
   }, [effectiveSelected]);
 
   // The current selection, readable from the IPC listener without re-subscribing it

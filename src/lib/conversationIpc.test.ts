@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { isSelect, isUpdated, PANEL_REGION, STAGE_REGION , isRequestSelection } from './conversationIpc';
+import {
+  isSelect,
+  isUpdated,
+  PANEL_REGION,
+  STAGE_REGION,
+  isRequestSelection,
+  isClearSelection,
+  clearSelectionMessage,
+} from './conversationIpc';
 
 describe('conversationIpc — panel↔stage message contract', () => {
   it('region constants name the two slots', () => {
@@ -34,13 +42,31 @@ describe('conversationIpc — panel↔stage message contract', () => {
     expect(isRequestSelection('request-selection')).toBe(false);
   });
 
-  it('the three message types are mutually exclusive', () => {
+  it('isClearSelection accepts the empty-selection message and rejects others (R3-1079)', () => {
+    expect(isClearSelection({ type: 'clear-selection' })).toBe(true);
+    // Carries no payload, like request-selection: the stage's empty state is its
+    // own — a crafted id here has nothing to steer.
+    expect(isClearSelection({ type: 'clear-selection', id: 'attacker-choice' })).toBe(true);
+    expect(isClearSelection({ type: 'select-conversation', id: 'c1' })).toBe(false);
+    expect(isClearSelection({ type: 'request-selection' })).toBe(false);
+    expect(isClearSelection({})).toBe(false);
+    expect(isClearSelection(null)).toBe(false);
+    expect(isClearSelection('clear-selection')).toBe(false);
+  });
+
+  it('clearSelectionMessage builds the one shape the announcing sites post (R3-1079)', () => {
+    expect(clearSelectionMessage()).toEqual({ type: 'clear-selection' });
+    expect(isClearSelection(clearSelectionMessage())).toBe(true);
+  });
+
+  it('the four message types are mutually exclusive', () => {
     const msgs = [
       { type: 'select-conversation', id: 'c1' },
       { type: 'request-selection' },
       { type: 'conversation-updated', id: 'c1' },
+      { type: 'clear-selection' },
     ];
-    const guards = [isSelect, isRequestSelection, isUpdated];
+    const guards = [isSelect, isRequestSelection, isUpdated, isClearSelection];
     for (const m of msgs) {
       expect(guards.filter((g) => g(m)).length).toBe(1);
     }
