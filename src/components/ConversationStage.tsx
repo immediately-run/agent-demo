@@ -306,9 +306,11 @@ export default function ConversationStage() {
    * ENOENT. The abort may lose that race to the store's own tripwire (the
    * delete rmTrees the lease, so the next boundary append rejects
    * `conversation-removed` and the loop throws) — either way the run ends, and
-   * every catch below stays silent for a conversation the stage no longer
-   * shows: its failure row, its lease offer and its save error belong to a view
-   * that is gone.
+   * its unwind stays silent: the outer catches of `run`/`resumeRun` skip their
+   * user-facing writes for a conversation the stage no longer shows, and the
+   * fold paths persist the transcript without re-binding or surfacing the
+   * benign ENOENT (each catch's own comment names exactly what it still
+   * surfaces).
    */
   const clearStage = useCallback(() => {
     abortRef.current?.abort();
@@ -765,8 +767,9 @@ export default function ConversationStage() {
       // the loop, and the next boundary append rejects `conversation-removed`
       // into THIS catch after clearStage already emptied the stage. The row,
       // the offer and the store error below belong to a view that is gone; a
-      // run whose conversation is still shown (the cross-frame delete with
-      // another row re-selected) keeps every surface.
+      // run whose conversation is still shown (a cross-frame delete the list
+      // has not yet processed — the row is still selected there) keeps every
+      // surface.
       if (conv && convRef.current?.id !== conv.id) return;
       // R3-561: the two lease codes are UX states, not codes to print (§9). The
       // discrimination and the copy live in `lib/storeError` — pasting them here
@@ -1030,6 +1033,15 @@ export default function ConversationStage() {
         void postToRegion(PANEL_REGION, { type: "conversation-updated", id: conv.id }).catch(() => {});
       }
     } catch (e) {
+      // Same discrimination as the run paths' fold catches (R3-1079 round 2):
+      // silent only for a cleared stage or a deleted record — a delete landing
+      // during the await must not paint a banner on the emptied stage; any
+      // other fold fault still surfaces (R3-247).
+      if (
+        convRef.current?.id !== conv.id &&
+        (convRef.current === null || (e as { code?: string } | null)?.code === "ENOENT")
+      )
+        return;
       setStoreError(describe(e, NO_STORE_SUFFIX));
     }
   };
