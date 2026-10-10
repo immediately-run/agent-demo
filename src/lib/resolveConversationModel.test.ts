@@ -149,6 +149,30 @@ describe('runFeaturesFor (R3-620) — what a run sizes itself by', () => {
     });
   });
 
+  it('R3-1074 — a chosen provider WITH described features is sized by them', () => {
+    const withFeatures = configured({
+      connectedProviders: [
+        { providerId: 'llm.chat.openrouter', displayName: 'OpenRouter', models: ['capable/model'] },
+        {
+          providerId: 'llm.chat.anthropic',
+          displayName: 'Anthropic',
+          models: ['claude-x'],
+          features: { tools: true, vision: true, jsonMode: true, reasoning: true, maxContextTokens: 1000000 },
+        },
+      ],
+    });
+    expect(runFeaturesFor({ providerId: 'llm.chat.anthropic', model: 'claude-x' }, withFeatures)).toEqual({
+      contextWindow: 1000000,
+      vision: true,
+    });
+  });
+
+  it('R3-1074 — a choice the connected set does not name keeps the conservative answer', () => {
+    expect(
+      runFeaturesFor({ providerId: 'llm.chat.gemini', model: 'g' }, configured()),
+    ).toEqual({ vision: false });
+  });
+
   it('no configured provider → nothing to size by', () => {
     expect(runFeaturesFor(undefined, deriveChatProviderState(true, false, null))).toEqual({ vision: false });
     expect(runFeaturesFor(undefined, deriveChatProviderState(false, false, null))).toEqual({ vision: false });
