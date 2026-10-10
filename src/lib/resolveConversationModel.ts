@@ -102,15 +102,22 @@ export interface RunFeatures {
 }
 
 /**
- * The features for a run on `runModel`. The host describes the features of the
- * default provider only, so they apply when the run uses that provider. A run on
- * another provider gets the conservative answer — no image parts, no context
- * budget — because sizing it by the default provider's numbers would be wrong
+ * The features for a run on `runModel`. A run on the DEFAULT provider sizes by the
+ * described provider's features, as before. A run on a CHOSEN provider sizes by that
+ * choice's own `features` (R3-1074) when the host sent them; a choice with no
+ * `features` (an older host) keeps the conservative answer — no image parts, no
+ * context budget — because sizing it by the default provider's numbers would be wrong
  * in either direction.
  */
 export function runFeaturesFor(runModel: ConversationModelPair | undefined, ps: ChatProviderState): RunFeatures {
   const info = ps.status === 'configured' ? ps.provider : null;
   if (!info) return { vision: false };
-  if (runModel && runModel.providerId !== info.providerId) return { vision: false };
+  if (runModel && runModel.providerId !== info.providerId) {
+    // R3-1074: the chosen provider's own features, when the host described them.
+    const choice = info.connectedProviders?.find((c) => c.providerId === runModel.providerId);
+    const f = choice?.features;
+    if (!f) return { vision: false };
+    return { contextWindow: f.maxContextTokens, vision: f.vision === true };
+  }
   return { contextWindow: info.features.maxContextTokens, vision: info.features.vision === true };
 }
