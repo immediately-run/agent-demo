@@ -286,7 +286,8 @@ export interface RunAgentOptions {
    *  Set 0 to disable the backstop. */
   maxNudges?: number;
   // ---- R3-220 accounting / compaction (all inert unless `contextWindow` is set) ----
-  /** The resolved provider's context window (`describeChat().features.maxContextTokens`).
+  /** The context window of the provider this run uses — `runFeaturesFor(...).contextWindow`,
+   *  which reads the default provider's features or the chosen provider's own.
    *  Compaction is disabled when this is absent/0 — the loop then behaves as before. */
   contextWindow?: number;
   /** Headroom left below the window before compacting (default: 25% of the window). */
