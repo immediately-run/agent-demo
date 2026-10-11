@@ -1,7 +1,7 @@
 // resolveConversationModel (R3-620): the per-conversation model resolution,
 // pinned pure — every rule the stage's picker and the run's chat call ride on.
 import { describe, expect, it } from 'vitest';
-import { deriveChatProviderState, type ChatProviderInfo } from '@immediately-run/sdk';
+import { deriveChatProviderState, normalizeProviderInfo, type ChatProviderInfo } from '@immediately-run/sdk';
 import {
   resolveConversationModel,
   runFeaturesFor,
@@ -131,7 +131,7 @@ describe('runModelFor (R3-620) — what rides chat()', () => {
   });
 });
 
-describe('runFeaturesFor (R3-620) — what a run sizes itself by', () => {
+describe('runFeaturesFor — what a run sizes itself by', () => {
   it('the default run uses the described provider features', () => {
     expect(runFeaturesFor(undefined, configured())).toEqual({ contextWindow: 200000, vision: true });
   });
@@ -143,13 +143,13 @@ describe('runFeaturesFor (R3-620) — what a run sizes itself by', () => {
     });
   });
 
-  it('a chosen model on another provider gets no image parts and no context budget', () => {
+  it('a chosen provider whose choice carries no features gets no image parts and no context budget', () => {
     expect(runFeaturesFor({ providerId: 'llm.chat.anthropic', model: 'claude-x' }, configured())).toEqual({
       vision: false,
     });
   });
 
-  it('R3-1074 — a chosen provider WITH described features is sized by them', () => {
+  it('a chosen provider with described features is sized by them', () => {
     const withFeatures = configured({
       connectedProviders: [
         { providerId: 'llm.chat.openrouter', displayName: 'OpenRouter', models: ['capable/model'] },
@@ -167,10 +167,42 @@ describe('runFeaturesFor (R3-620) — what a run sizes itself by', () => {
     });
   });
 
-  it('R3-1074 — a choice the connected set does not name keeps the conservative answer', () => {
+  it('a choice the connected set does not name keeps the conservative answer', () => {
     expect(
       runFeaturesFor({ providerId: 'llm.chat.gemini', model: 'g' }, configured()),
     ).toEqual({ vision: false });
+  });
+
+  // The two cases below take their input from the SDK's own normalizer, the code that
+  // decides whether a choice's features reach the app at all. An SDK that rebuilds each
+  // choice without the field fails the first one.
+  const describedOverTheWire = (anthropicFeatures: unknown) =>
+    deriveChatProviderState(
+      true,
+      false,
+      normalizeProviderInfo({
+        ...info(),
+        connectedProviders: [
+          { providerId: 'llm.chat.openrouter', displayName: 'OpenRouter', models: ['capable/model'] },
+          { providerId: 'llm.chat.anthropic', displayName: 'Anthropic', models: ['claude-x'], features: anthropicFeatures },
+        ],
+      } as ChatProviderInfo),
+    );
+
+  it('features the host sent on a choice survive the SDK normalizer and size the run', () => {
+    const ps = describedOverTheWire({ tools: true, vision: true, jsonMode: true, maxContextTokens: 1000000 });
+    expect(runFeaturesFor({ providerId: 'llm.chat.anthropic', model: 'claude-x' }, ps)).toEqual({
+      contextWindow: 1000000,
+      vision: true,
+    });
+  });
+
+  it('malformed features on a choice are dropped whole by the SDK, so the run keeps the conservative answer', () => {
+    // No context window: a half-described provider is not sized by the half.
+    const ps = describedOverTheWire({ tools: true, vision: true, jsonMode: true });
+    expect(runFeaturesFor({ providerId: 'llm.chat.anthropic', model: 'claude-x' }, ps)).toEqual({ vision: false });
+    // The default provider is still sized by its own features.
+    expect(runFeaturesFor(undefined, ps)).toEqual({ contextWindow: 200000, vision: true });
   });
 
   it('no configured provider → nothing to size by', () => {

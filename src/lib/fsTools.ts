@@ -120,8 +120,8 @@ export interface FsToolsOptions {
   /** When the mount is `ro`, writes/deletes are refused locally (no raw EROFS). */
   readOnly?: boolean;
   /**
-   * Does the resolved model accept images (R3-339)? From
-   * `describeChat().features.vision`. When false, `read_file` on an image SAYS SO in the
+   * Does the resolved model accept images (R3-339)? From `runFeaturesFor(...).vision`,
+   * which reads the default provider's features or the chosen provider's own. When false, `read_file` on an image SAYS SO in the
    * tool result rather than sending something that errors upstream — absent rather than
    * fake, like the rest of the toolset. Defaults to false: a caller that does not know
    * must not gamble the user's request on a guess.

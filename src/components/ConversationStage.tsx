@@ -187,8 +187,9 @@ export default function ConversationStage() {
   const hostModelView = useMemo(() => toHostModelView(providerState), [providerState]);
   // R3-339 — does the model this conversation runs on accept images? The tool is
   // told, so a `read_file` on a PNG can say the model cannot look at it instead of
-  // sending something that errors upstream. The host describes the default
-  // provider's features only, so a conversation on another provider gets "no".
+  // sending something that errors upstream. A conversation on another provider
+  // is answered from that provider's own described features, and gets "no" only
+  // when the host sent none for it (`runFeaturesFor`).
   const vision = useMemo(
     () => runFeaturesFor(runModelFor({ model: convModel }, providerState), providerState).vision,
     [convModel, providerState],
